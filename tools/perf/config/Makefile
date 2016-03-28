@@ -587,6 +587,11 @@ ifneq ($(filter -lbfd,$(EXTLIBS)),)
   CFLAGS += -DHAVE_LIBBFD_SUPPORT
 endif
 
+ifeq ($(feature-udis86), 1)
+  CFLAGS += -DHAVE_UDIS86
+  EXTLIBS += -ludis86
+endif
+
 ifndef NO_ZLIB
   ifeq ($(feature-zlib), 1)
     CFLAGS += -DHAVE_ZLIB_SUPPORT

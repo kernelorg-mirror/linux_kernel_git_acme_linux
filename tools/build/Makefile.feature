@@ -55,7 +55,8 @@ FEATURE_TESTS_BASIC :=			\
 	zlib				\
 	lzma				\
 	get_cpuid			\
-	bpf
+	bpf				\
+	udis86
 
 # FEATURE_TESTS_BASIC + FEATURE_TESTS_EXTRA is the complete list
 # of all feature tests
@@ -94,7 +95,8 @@ FEATURE_DISPLAY ?=			\
 	zlib				\
 	lzma				\
 	get_cpuid			\
-	bpf
+	bpf				\
+	udis86
 
 # Set FEATURE_CHECK_(C|LD)FLAGS-all for all FEATURE_TESTS features.
 # If in the future we need per-feature checks/flags for features not

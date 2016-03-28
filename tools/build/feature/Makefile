@@ -36,7 +36,8 @@ FILES=					\
 	test-zlib.bin			\
 	test-lzma.bin			\
 	test-bpf.bin			\
-	test-get_cpuid.bin
+	test-get_cpuid.bin		\
+	test-udis86.bin
 
 FILES := $(addprefix $(OUTPUT),$(FILES))
 
@@ -51,7 +52,7 @@ __BUILD = $(CC) $(CFLAGS) -Wall -Werror -o $@ $(patsubst %.bin,%.c,$(@F)) $(LDFL
 ###############################
 
 $(OUTPUT)test-all.bin:
-	$(BUILD) -fstack-protector-all -O2 -D_FORTIFY_SOURCE=2 -ldw -lelf -lnuma -lelf -laudit -I/usr/include/slang -lslang $(shell $(PKG_CONFIG) --libs --cflags gtk+-2.0 2>/dev/null) $(FLAGS_PERL_EMBED) $(FLAGS_PYTHON_EMBED) -DPACKAGE='"perf"' -lbfd -ldl -lz -llzma
+	$(BUILD) -fstack-protector-all -O2 -D_FORTIFY_SOURCE=2 -ldw -lelf -lnuma -lelf -laudit -I/usr/include/slang -lslang $(shell $(PKG_CONFIG) --libs --cflags gtk+-2.0 2>/dev/null) $(FLAGS_PERL_EMBED) $(FLAGS_PYTHON_EMBED) -DPACKAGE='"perf"' -lbfd -ldl -lz -llzma -ludis86
 
 $(OUTPUT)test-hello.bin:
 	$(BUILD)
@@ -96,6 +97,9 @@ $(OUTPUT)test-numa_num_possible_cpus.bin:
 
 $(OUTPUT)test-libunwind.bin:
 	$(BUILD) -lelf
+
+$(OUTPUT)test-udis86.bin:
+	$(BUILD) -ludis86
 
 $(OUTPUT)test-libunwind-debug-frame.bin:
 	$(BUILD) -lelf
