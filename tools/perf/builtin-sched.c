@@ -1191,6 +1191,7 @@ static void output_lat_thread(struct perf_sched *sched, struct work_atoms *work_
 	int i;
 	int ret;
 	u64 avg;
+	char buf[32];
 
 	if (!work_list->nb_atoms)
 		return;
@@ -1213,11 +1214,11 @@ static void output_lat_thread(struct perf_sched *sched, struct work_atoms *work_
 
 	avg = work_list->total_lat / work_list->nb_atoms;
 
-	printf("|%11.3f ms |%9" PRIu64 " | avg:%9.3f ms | max:%9.3f ms | max at: %13.6f s\n",
+	printf("|%11.3f ms |%9" PRIu64 " | avg:%9.3f ms | max:%9.3f ms | max at: %13s s\n",
 	      (double)work_list->total_runtime / NSEC_PER_MSEC,
 		 work_list->nb_atoms, (double)avg / NSEC_PER_MSEC,
 		 (double)work_list->max_lat / NSEC_PER_MSEC,
-		 (double)work_list->max_lat_at / NSEC_PER_SEC);
+		 timestamp_in_usec(buf, sizeof(buf), work_list->max_lat));
 }
 
 static int pid_cmp(struct work_atoms *l, struct work_atoms *r)
@@ -1402,6 +1403,7 @@ static int map_switch_event(struct perf_sched *sched, struct perf_evsel *evsel,
 	int cpus_nr;
 	bool new_cpu = false;
 	const char *color = PERF_COLOR_NORMAL;
+	char buf[32];
 
 	BUG_ON(this_cpu >= MAX_CPUS || this_cpu < 0);
 
@@ -1492,7 +1494,8 @@ static int map_switch_event(struct perf_sched *sched, struct perf_evsel *evsel,
 	if (sched->map.cpus && !cpu_map__has(sched->map.cpus, this_cpu))
 		goto out;
 
-	color_fprintf(stdout, color, "  %12.6f secs ", (double)timestamp / NSEC_PER_SEC);
+	color_fprintf(stdout, color, "  %12s secs ",
+		      timestamp_in_usec(buf, sizeof(buf), timestamp));
 	if (new_shortname || (verbose && sched_in->tid)) {
 		const char *pid_color = color;
 

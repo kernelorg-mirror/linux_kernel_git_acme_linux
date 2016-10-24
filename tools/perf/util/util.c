@@ -433,6 +433,15 @@ int parse_nsec_time(const char *str, u64 *ptime)
 	return 0;
 }
 
+char *timestamp_in_usec(char *buf, size_t sz, u64 timestamp)
+{
+	u64  sec = timestamp / NSEC_PER_SEC;
+	u64 usec = (timestamp % NSEC_PER_SEC) / NSEC_PER_USEC;
+
+	scnprintf(buf, sz, "%"PRIu64".%06"PRIu64, sec, usec);
+	return buf;
+}
+
 unsigned long parse_tag_value(const char *str, struct parse_tag *tags)
 {
 	struct parse_tag *i = tags;

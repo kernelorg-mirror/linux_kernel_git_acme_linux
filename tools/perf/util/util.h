@@ -362,4 +362,7 @@ extern int sched_getcpu(void);
 #endif
 
 int is_printable_array(char *p, unsigned int len);
+
+char *timestamp_in_usec(char *buf, size_t sz, u64 timestamp);
+
 #endif /* GIT_COMPAT_UTIL_H */
