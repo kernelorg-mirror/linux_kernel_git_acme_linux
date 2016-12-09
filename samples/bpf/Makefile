@@ -92,7 +92,8 @@ always += test_current_task_under_cgroup_kern.o
 always += trace_event_kern.o
 always += sampleip_kern.o
 
-HOSTCFLAGS += -I$(objtree)/usr/include -I$(srctree)/tools/lib/
+HOSTCFLAGS += -I$(objtree)/usr/include -I$(srctree)/tools/lib/ \
+	      -I$(srctree)/tools/include -I$(srctree)/tools/perf
 
 HOSTCFLAGS_bpf_load.o += -I$(objtree)/usr/include -Wno-unused-variable
 HOSTLOADLIBES_fds_example += -lelf
