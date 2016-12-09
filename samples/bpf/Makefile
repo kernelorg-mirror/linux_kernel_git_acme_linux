@@ -127,7 +127,6 @@ CLANG ?= clang
 
 # Trick to allow make to be run from this directory
 all:
-	$(MAKE) -C ../../ tools/lib/bpf/
 	$(MAKE) -C ../../ $$PWD/
 
 clean:

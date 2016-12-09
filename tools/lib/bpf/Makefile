@@ -149,8 +149,6 @@ CMD_TARGETS = $(LIB_FILE)
 
 TARGETS = $(CMD_TARGETS)
 
-libbpf: all
-
 all: fixdep $(VERSION_FILES) all_cmd
 
 all_cmd: $(CMD_TARGETS)
