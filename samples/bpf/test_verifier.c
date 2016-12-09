@@ -24,6 +24,8 @@
 
 #define MAX_FIXUPS 8
 
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
+
 struct bpf_test {
 	const char *descr;
 	struct bpf_insn	insns[MAX_INSNS];
@@ -2466,9 +2468,9 @@ static int test(void)
 
 		printf("#%d %s ", i, tests[i].descr);
 
-		prog_fd = bpf_prog_load(prog_type ?: BPF_PROG_TYPE_SOCKET_FILTER,
-					prog, prog_len * sizeof(struct bpf_insn),
-					"GPL", 0);
+		prog_fd = bpf_load_program(prog_type ?: BPF_PROG_TYPE_SOCKET_FILTER,
+					   prog, prog_len * sizeof(struct bpf_insn),
+					   "GPL", 0, NULL, 0);
 
 		if (unpriv && tests[i].result_unpriv != UNDEF)
 			expected_result = tests[i].result_unpriv;

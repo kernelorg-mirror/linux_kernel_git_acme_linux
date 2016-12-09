@@ -18,6 +18,8 @@
 #include "bpf_load.h"
 #include "libbpf.h"
 
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
+
 static int set_link_xdp_fd(int ifindex, int fd)
 {
 	struct sockaddr_nl sa;
@@ -134,7 +136,7 @@ static void poll_stats(int interval)
 		for (key = 0; key < nr_keys; key++) {
 			__u64 sum = 0;
 
-			assert(bpf_lookup_elem(map_fd[0], &key, values) == 0);
+			assert(bpf_map_lookup_elem(map_fd[0], &key, values) == 0);
 			for (i = 0; i < nr_cpus; i++)
 				sum += (values[i] - prev[key][i]);
 			if (sum)

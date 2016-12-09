@@ -7,6 +7,8 @@
 #include <arpa/inet.h>
 #include <sys/resource.h>
 
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
+
 struct pair {
 	__u64 packets;
 	__u64 bytes;
@@ -39,8 +41,8 @@ int main(int ac, char **argv)
 		int key = 0, next_key;
 		struct pair value;
 
-		while (bpf_get_next_key(map_fd[0], &key, &next_key) == 0) {
-			bpf_lookup_elem(map_fd[0], &next_key, &value);
+		while (bpf_map_get_next_key(map_fd[0], &key, &next_key) == 0) {
+			bpf_map_lookup_elem(map_fd[0], &next_key, &value);
 			printf("ip %s bytes %lld packets %lld\n",
 			       inet_ntoa((struct in_addr){htonl(next_key)}),
 			       value.bytes, value.packets);

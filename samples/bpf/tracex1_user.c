@@ -4,6 +4,8 @@
 #include "libbpf.h"
 #include "bpf_load.h"
 
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
+
 int main(int ac, char **argv)
 {
 	FILE *f;

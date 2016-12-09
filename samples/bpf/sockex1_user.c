@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
+
 int main(int ac, char **argv)
 {
 	char filename[256];
@@ -32,13 +34,13 @@ int main(int ac, char **argv)
 		int key;
 
 		key = IPPROTO_TCP;
-		assert(bpf_lookup_elem(map_fd[0], &key, &tcp_cnt) == 0);
+		assert(bpf_map_lookup_elem(map_fd[0], &key, &tcp_cnt) == 0);
 
 		key = IPPROTO_UDP;
-		assert(bpf_lookup_elem(map_fd[0], &key, &udp_cnt) == 0);
+		assert(bpf_map_lookup_elem(map_fd[0], &key, &udp_cnt) == 0);
 
 		key = IPPROTO_ICMP;
-		assert(bpf_lookup_elem(map_fd[0], &key, &icmp_cnt) == 0);
+		assert(bpf_map_lookup_elem(map_fd[0], &key, &icmp_cnt) == 0);
 
 		printf("TCP %lld UDP %lld ICMP %lld bytes\n",
 		       tcp_cnt, udp_cnt, icmp_cnt);

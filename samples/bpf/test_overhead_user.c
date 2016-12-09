@@ -24,6 +24,8 @@
 
 #define MAX_CNT 1000000
 
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
+
 static __u64 time_get_ns(void)
 {
 	struct timespec ts;

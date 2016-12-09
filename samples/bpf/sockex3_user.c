@@ -7,6 +7,8 @@
 #include <arpa/inet.h>
 #include <sys/resource.h>
 
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
+
 struct bpf_flow_keys {
 	__be32 src;
 	__be32 dst;
@@ -54,8 +56,8 @@ int main(int argc, char **argv)
 
 		sleep(1);
 		printf("IP     src.port -> dst.port               bytes      packets\n");
-		while (bpf_get_next_key(map_fd[2], &key, &next_key) == 0) {
-			bpf_lookup_elem(map_fd[2], &next_key, &value);
+		while (bpf_map_get_next_key(map_fd[2], &key, &next_key) == 0) {
+			bpf_map_lookup_elem(map_fd[2], &next_key, &value);
 			printf("%s.%05d -> %s.%05d %12lld %12lld\n",
 			       inet_ntoa((struct in_addr){htonl(next_key.src)}),
 			       next_key.port16[0],

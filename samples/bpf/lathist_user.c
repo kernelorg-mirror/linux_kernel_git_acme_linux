@@ -23,6 +23,7 @@ struct cpu_hist {
 };
 
 static struct cpu_hist cpu_hist[MAX_CPU];
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
 
 static void stars(char *str, long val, long max, int width)
 {
@@ -73,7 +74,7 @@ static void get_data(int fd)
 	for (c = 0; c < MAX_CPU; c++) {
 		for (i = 0; i < MAX_ENTRIES; i++) {
 			key = c * MAX_ENTRIES + i;
-			bpf_lookup_elem(fd, &key, &value);
+			bpf_map_lookup_elem(fd, &key, &value);
 
 			cpu_hist[c].data[i] = value;
 			if (value > cpu_hist[c].max)

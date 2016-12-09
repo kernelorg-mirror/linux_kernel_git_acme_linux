@@ -37,6 +37,7 @@ static __u64 time_get_ns(void)
 #define PERCPU_HASH_KMALLOC	(1 << 3)
 
 static int test_flags = ~0;
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
 
 static void test_hash_prealloc(int cpu)
 {

@@ -8,6 +8,8 @@
 #include "bpf_load.h"
 #include <sys/resource.h>
 
+char bpf_log_buf[BPF_LOG_BUF_SIZE];
+
 /* install fake seccomp program to enable seccomp code path inside the kernel,
  * so that our kprobe attached to seccomp_phase1() can be triggered
  */
