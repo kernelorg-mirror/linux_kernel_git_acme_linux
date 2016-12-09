@@ -27,6 +27,7 @@
 #include <linux/ip.h>
 #include <stddef.h>
 #include "libbpf.h"
+#include "sock_example.h"
 
 static int test_sock(void)
 {

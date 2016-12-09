@@ -30,7 +30,7 @@ hostprogs-y += sampleip
 hostprogs-y += tc_l2_redirect
 
 # Libbpf dependencies
-LIBBPF := libbpf.o ../../tools/lib/bpf/bpf.o
+LIBBPF := ../../tools/lib/bpf/bpf.o
 
 test_verifier-objs := test_verifier.o $(LIBBPF)
 test_maps-objs := test_maps.o $(LIBBPF)
