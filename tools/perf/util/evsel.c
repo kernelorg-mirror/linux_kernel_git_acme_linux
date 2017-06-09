@@ -273,6 +273,11 @@ struct perf_evsel *perf_evsel__new_cycles(void)
 	struct perf_evsel *evsel;
 
 	event_attr_init(&attr);
+	/*
+	 * Unnamed union member, not supported as struct member named
+	 * initializer in older compilers such as gcc 4.4.7
+	 */
+	attr.sample_period = 1;
 
 	perf_event_attr__set_max_precise_ip(&attr);
 
