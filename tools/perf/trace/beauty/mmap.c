@@ -62,6 +62,7 @@ static size_t syscall_arg__scnprintf_mmap_flags(char *bf, size_t size,
 	P_MMAP_FLAG(POPULATE);
 	P_MMAP_FLAG(STACK);
 	P_MMAP_FLAG(UNINITIALIZED);
+	P_MMAP_FLAG(SYNC);
 #undef P_MMAP_FLAG
 
 	if (flags)
