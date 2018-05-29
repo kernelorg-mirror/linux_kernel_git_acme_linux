@@ -461,7 +461,6 @@ static struct hist_entry *hist_entry__new(struct hist_entry *template,
 					  bool sample_self)
 {
 	struct hist_entry_ops *ops = template->ops;
-	struct perf_evsel *evsel = hists_to_evsel(template->hists);
 	size_t callchain_size = 0;
 	struct hist_entry *he;
 	int err = 0;
@@ -473,7 +472,7 @@ static struct hist_entry *hist_entry__new(struct hist_entry *template,
 	 * e.g.:  'perf record -e cycles,cache-misses/max-stack=10/', so lets
 	 * not waste space for that.
 	 */
-	if (symbol_conf.use_callchain && evsel__has_callchain(evsel))
+	if (hist_entry__has_callchains(template) && symbol_conf.use_callchain)
 		callchain_size = sizeof(struct callchain_root);
 
 	he = ops->new(callchain_size);
