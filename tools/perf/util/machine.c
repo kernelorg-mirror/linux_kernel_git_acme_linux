@@ -2317,15 +2317,15 @@ static int unwind_entry(struct unwind_entry *entry, void *arg)
 	if (symbol_conf.hide_unresolved && entry->sym == NULL)
 		return 0;
 
-	if (append_inlines(cursor, entry->map, entry->sym, entry->ip) == 0)
-		return 0;
-
 	/*
 	 * Convert entry->ip from a virtual address to an offset in
 	 * its corresponding binary.
 	 */
 	if (entry->map)
 		addr = map__map_ip(entry->map, entry->ip);
+
+	if (append_inlines(cursor, entry->map, entry->sym, addr) == 0)
+		return 0;
 
 	srcline = callchain_srcline(entry->map, entry->sym, addr);
 	return callchain_cursor_append(cursor, entry->ip,
