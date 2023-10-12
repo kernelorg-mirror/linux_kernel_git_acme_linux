@@ -3650,11 +3650,17 @@ struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
 	u64 ip = he->ip;
 	int i;
 
-	if (ms->map == NULL || ms->sym == NULL)
-		return NULL;
+	ann_data_stat.total++;
 
-	if (evsel__get_arch(evsel, &arch) < 0)
+	if (ms->map == NULL || ms->sym == NULL) {
+		ann_data_stat.no_sym++;
 		return NULL;
+	}
+
+	if (evsel__get_arch(evsel, &arch) < 0) {
+		ann_data_stat.no_insn++;
+		return NULL;
+	}
 
 	/* Make sure it runs objdump to get disasm of the function */
 	symbol__ensure_annotate(ms, evsel);
@@ -3664,11 +3670,15 @@ struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
 	 * This is too slow...
 	 */
 	dl = find_disasm_line(ms->sym, ip);
-	if (dl == NULL)
+	if (dl == NULL) {
+		ann_data_stat.no_insn++;
 		return NULL;
+	}
 
-	if (annotate_get_insn_location(arch, dl, &loc) < 0)
+	if (annotate_get_insn_location(arch, dl, &loc) < 0) {
+		ann_data_stat.no_insn_ops++;
 		return NULL;
+	}
 
 	for_each_insn_op_loc(&loc, i, op_loc) {
 		if (!op_loc->mem_ref)
@@ -3685,6 +3695,8 @@ struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
 		he->mem_type_off = op_loc->offset;
 		return mem_type;
 	}
+
+	ann_data_stat.no_mem_ops++;
 	return NULL;
 }
 #endif // HAVE_DWARF_SUPPORT
