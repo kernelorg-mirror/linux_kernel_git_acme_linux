@@ -3689,6 +3689,18 @@ static struct annotated_item_stat *annotate_data_stat(struct list_head *head,
 	return istat;
 }
 
+static bool is_stack_operation(struct arch *arch, struct disasm_line *dl)
+{
+	if (arch__is(arch, "x86")) {
+		if (!strncmp(dl->ins.name, "push", 4) ||
+		    !strncmp(dl->ins.name, "pop", 3) ||
+		    !strncmp(dl->ins.name, "ret", 3))
+			return true;
+	}
+
+	return false;
+}
+
 /**
  * hist_entry__get_data_type - find data type for given hist entry
  * @he: hist entry
@@ -3747,6 +3759,12 @@ retry:
 		ann_data_stat.no_insn_ops++;
 		istat->bad++;
 		return NULL;
+	}
+
+	if (is_stack_operation(arch, dl)) {
+		istat->good++;
+		he->mem_type_off = 0;
+		return &stackop_type;
 	}
 
 	for_each_insn_op_loc(&loc, i, op_loc) {

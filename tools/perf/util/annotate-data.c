@@ -29,6 +29,13 @@ struct annotated_data_type unknown_type = {
 	},
 };
 
+struct annotated_data_type stackop_type = {
+	.self = {
+		.type_name = (char *)"(stack operation)",
+		.children = LIST_HEAD_INIT(stackop_type.self.children),
+	},
+};
+
 /* Data type collection debug statistics */
 struct annotated_data_stat ann_data_stat;
 
