@@ -42,7 +42,9 @@ struct symbol_conf {
 			inline_name,
 			disable_add2line_warn,
 			buildid_mmap2,
-			guest_code;
+			guest_code,
+			annotate_data_member,
+			annotate_data_sample;
 	const char	*vmlinux_name,
 			*kallsyms_name,
 			*source_prefix,

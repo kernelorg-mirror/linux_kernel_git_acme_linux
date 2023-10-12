@@ -20,6 +20,7 @@
 #include "util/evlist.h"
 #include "util/evsel.h"
 #include "util/annotate.h"
+#include "util/annotate-data.h"
 #include "util/event.h"
 #include <subcmd/parse-options.h>
 #include "util/parse-events.h"
@@ -56,6 +57,7 @@ struct perf_annotate {
 	bool	   skip_missing;
 	bool	   has_br_stack;
 	bool	   group_set;
+	bool	   data_type;
 	float	   min_percent;
 	const char *sym_hist_filter;
 	const char *cpu_list;
@@ -231,7 +233,11 @@ static int evsel__add_sample(struct evsel *evsel, struct perf_sample *sample,
 {
 	struct hists *hists = evsel__hists(evsel);
 	struct hist_entry *he;
+	struct annotation *notes = al->sym ? symbol__annotation(al->sym) : NULL;
 	int ret;
+
+	if (notes)
+		notes->options = &ann->opts;
 
 	if ((!ann->has_br_stack || !has_annotation(ann)) &&
 	    ann->sym_hist_filter != NULL &&
@@ -320,6 +326,32 @@ static int hist_entry__tty_annotate(struct hist_entry *he,
 	return symbol__tty_annotate2(&he->ms, evsel, &ann->opts);
 }
 
+static void print_annotated_data_type(struct annotated_data_type *mem_type,
+				      struct annotated_member *member,
+				      struct evsel *evsel, int indent)
+{
+	struct annotated_member *child;
+	struct type_hist *h = mem_type->histograms[evsel->core.idx];
+	int i, samples = 0;
+
+	for (i = 0; i < member->size; i++)
+		samples += h->addr[member->offset + i].nr_samples;
+
+	printf(" %10d %10d %10d  %*s%s\t%s",
+	       samples, member->offset, member->size, indent, "", member->type_name,
+	       member->var_name ?: "");
+
+	if (!list_empty(&member->children))
+		printf(" {\n");
+
+	list_for_each_entry(child, &member->children, node)
+		print_annotated_data_type(mem_type, child, evsel, indent + 4);
+
+	if (!list_empty(&member->children))
+		printf("%*s}", 35 + indent, "");
+	printf(";\n");
+}
+
 static void hists__find_annotations(struct hists *hists,
 				    struct evsel *evsel,
 				    struct perf_annotate *ann)
@@ -357,6 +389,23 @@ find_next:
 			else
 				nd = rb_next(nd);
 			continue;
+		}
+
+		if (ann->data_type) {
+			struct map *map = he->ms.map;
+
+			/* skip unknown type */
+			if (he->mem_type->histograms == NULL)
+				goto find_next;
+
+			printf("Annotate type: '%s' in %s (%d samples):\n",
+				he->mem_type->self.type_name, map->dso->name, he->stat.nr_events);
+			printf("============================================================================\n");
+			printf(" %10s %10s %10s  %s\n", "samples", "offset", "size", "field");
+
+			print_annotated_data_type(he->mem_type, &he->mem_type->self, evsel, 0);
+			printf("\n");
+			goto find_next;
 		}
 
 		if (use_browser == 2) {
@@ -606,6 +655,8 @@ int cmd_annotate(int argc, const char **argv)
 	OPT_CALLBACK_OPTARG(0, "itrace", &itrace_synth_opts, NULL, "opts",
 			    "Instruction Tracing options\n" ITRACE_HELP,
 			    itrace_parse_synth_opts),
+	OPT_BOOLEAN(0, "data-type", &annotate.data_type,
+		    "Show data type annotate for the memory accesses"),
 
 	OPT_END()
 	};
@@ -702,6 +753,14 @@ int cmd_annotate(int argc, const char **argv)
 		use_browser = 2;
 #endif
 
+	/* FIXME: only support stdio for now */
+	if (annotate.data_type) {
+		use_browser = 0;
+		annotate.opts.annotate_src = false;
+		symbol_conf.annotate_data_member = true;
+		symbol_conf.annotate_data_sample = true;
+	}
+
 	setup_browser(true);
 
 	/*
@@ -709,7 +768,10 @@ int cmd_annotate(int argc, const char **argv)
 	 * symbol, we do not care about the processes in annotate,
 	 * set sort order to avoid repeated output.
 	 */
-	sort_order = "dso,symbol";
+	if (annotate.data_type)
+		sort_order = "dso,type";
+	else
+		sort_order = "dso,symbol";
 
 	/*
 	 * Set SORT_MODE__BRANCH so that annotate display IPC/Cycle
