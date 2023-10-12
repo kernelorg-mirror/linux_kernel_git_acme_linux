@@ -40,10 +40,14 @@ struct annotated_data_type stackop_type = {
 /* Data type collection debug statistics */
 struct annotated_data_stat ann_data_stat;
 
-/* Type information in a register, valid when ok is true */
+/*
+ * Type information in a register, valid when ok is true.
+ * The scratch registers are invalidated after a function call.
+ */
 struct type_state_reg {
 	Dwarf_Die type;
 	bool ok;
+	bool scratch;
 };
 
 /* Type information in a stack location, dynamically allocated */
@@ -67,6 +71,7 @@ struct type_state_stack {
 struct type_state {
 	struct type_state_reg regs[TYPE_STATE_MAX_REGS];
 	struct list_head stack_vars;
+	int ret_reg;
 };
 
 static bool has_reg_type(struct type_state *state, int reg)
@@ -74,10 +79,23 @@ static bool has_reg_type(struct type_state *state, int reg)
 	return (unsigned)reg < ARRAY_SIZE(state->regs);
 }
 
-void init_type_state(struct type_state *state, struct arch *arch __maybe_unused)
+void init_type_state(struct type_state *state, struct arch *arch)
 {
 	memset(state, 0, sizeof(*state));
 	INIT_LIST_HEAD(&state->stack_vars);
+
+	if (arch__is(arch, "x86")) {
+		state->regs[0].scratch = true;
+		state->regs[1].scratch = true;
+		state->regs[2].scratch = true;
+		state->regs[4].scratch = true;
+		state->regs[5].scratch = true;
+		state->regs[8].scratch = true;
+		state->regs[9].scratch = true;
+		state->regs[10].scratch = true;
+		state->regs[11].scratch = true;
+		state->ret_reg = 0;
+	}
 }
 
 void exit_type_state(struct type_state *state)
@@ -433,6 +451,29 @@ void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
 	Dwarf_Die type_die;
 	int fbreg = dloc->fbreg;
 	int fboff = 0;
+
+	if (ins__is_call(&dl->ins)) {
+		Dwarf_Die func_die;
+
+		/* __fentry__ will preserve all registers */
+		if (dl->ops.target.sym &&
+		    !strcmp(dl->ops.target.sym->name, "__fentry__"))
+			return;
+
+		/* Otherwise invalidate scratch registers after call */
+		for (unsigned i = 0; i < ARRAY_SIZE(state->regs); i++) {
+			if (state->regs[i].scratch)
+				state->regs[i].ok = false;
+		}
+
+		/* Update register with the return type (if any) */
+		if (die_find_realfunc(cu_die, dl->ops.target.addr, &func_die) &&
+		    die_get_real_type(&func_die, &type_die)) {
+			state->regs[state->ret_reg].type = type_die;
+			state->regs[state->ret_reg].ok = true;
+		}
+		return;
+	}
 
 	/* FIXME: remove x86 specific code and handle more instructions like LEA */
 	if (!strstr(dl->ins.name, "mov"))
