@@ -427,6 +427,37 @@ void update_var_state(struct type_state *state, struct data_loc_info *dloc,
 	}
 }
 
+static bool get_global_var_type(Dwarf_Die *cu_die, struct map_symbol *ms, u64 ip,
+				u64 var_addr, const char *var_name, int var_offset,
+				Dwarf_Die *type_die)
+{
+	u64 pc;
+	int offset = var_offset;
+	bool is_pointer = false;
+	Dwarf_Die var_die;
+
+	pc = map__rip_2objdump(ms->map, ip);
+
+	/* Try to get the variable by address first */
+	if (die_find_variable_by_addr(cu_die, pc, var_addr, &var_die, &offset) &&
+	    check_variable(&var_die, type_die, offset, is_pointer) == 0 &&
+	    die_get_member_type(type_die, offset, type_die))
+		return true;
+
+	if (var_name == NULL)
+		return false;
+
+	offset = var_offset;
+
+	/* Try to get the name of global variable */
+	if (die_find_variable_at(cu_die, var_name, pc, &var_die) &&
+	    check_variable(&var_die, type_die, offset, is_pointer) == 0 &&
+	    die_get_member_type(type_die, offset, type_die))
+		return true;
+
+	return false;
+}
+
 /**
  * update_insn_state - Update type state for an instruction
  * @state: type state table
@@ -490,14 +521,36 @@ void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
 			fbreg = -1;
 	}
 
-	/* Case 1. register to register transfers */
+	/* Case 1. register to register or segment:offset to register transfers */
 	if (!src->mem_ref && !dst->mem_ref) {
 		if (!has_reg_type(state, dst->reg1))
 			return;
 
 		if (has_reg_type(state, src->reg1))
 			state->regs[dst->reg1] = state->regs[src->reg1];
-		else
+		else if (dloc->ms->map->dso->kernel &&
+			 src->segment == INSN_SEG_X86_GS) {
+			struct map_symbol *ms = dloc->ms;
+			int offset = src->offset;
+			u64 ip = ms->sym->start + dl->al.offset;
+			const char *var_name = NULL;
+			u64 var_addr;
+
+			/*
+			 * In kernel, %gs points to a per-cpu region for the
+			 * current CPU.  Access with a constant offset should
+			 * be treated as a global variable access.
+			 */
+			var_addr = src->offset;
+			get_percpu_var_info(dloc->thread, ms, dloc->cpumode,
+					    var_addr, &var_name, &offset);
+
+			if (get_global_var_type(cu_die, ms, ip, var_addr,
+						var_name, offset, &type_die)) {
+				state->regs[dst->reg1].type = type_die;
+				state->regs[dst->reg1].ok = true;
+			}
+		} else
 			state->regs[dst->reg1].ok = false;
 	}
 	/* Case 2. memory to register transers */
@@ -510,37 +563,20 @@ void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
 retry:
 		/* Check if it's a global variable */
 		if (sreg == DWARF_REG_PC) {
-			Dwarf_Die var_die;
 			struct map_symbol *ms = dloc->ms;
 			int offset = src->offset;
 			u64 ip = ms->sym->start + dl->al.offset;
-			u64 pc, addr;
 			const char *var_name = NULL;
+			u64 var_addr;
 
-			addr = annotate_calc_pcrel(ms, ip, offset, dl);
-			pc = map__rip_2objdump(ms->map, ip);
+			var_addr = annotate_calc_pcrel(ms, ip, offset, dl);
 
-			if (die_find_variable_by_addr(cu_die, pc, addr,
-						      &var_die, &offset) &&
-			    check_variable(&var_die, &type_die, offset,
-					   /*is_pointer=*/false) == 0 &&
-			    die_get_member_type(&type_die, offset, &type_die)) {
-				state->regs[dst->reg1].type = type_die;
-				state->regs[dst->reg1].ok = true;
-				return;
-			}
-
-			/* Try to get the name of global variable */
-			offset = src->offset;
 			get_global_var_info(dloc->thread, ms, ip, dl,
-					    dloc->cpumode, &addr,
+					    dloc->cpumode, &var_addr,
 					    &var_name, &offset);
 
-			if (var_name && die_find_variable_at(cu_die, var_name,
-							     pc, &var_die) &&
-			    check_variable(&var_die, &type_die, offset,
-					   /*is_pointer=*/false) == 0 &&
-			    die_get_member_type(&type_die, offset, &type_die)) {
+			if (get_global_var_type(cu_die, ms, ip, var_addr,
+						var_name, offset, &type_die)) {
 				state->regs[dst->reg1].type = type_die;
 				state->regs[dst->reg1].ok = true;
 			} else
