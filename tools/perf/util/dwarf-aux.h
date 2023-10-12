@@ -149,6 +149,9 @@ Dwarf_Die *die_find_variable_by_addr(Dwarf_Die *sc_die, Dwarf_Addr pc,
 				     Dwarf_Addr addr, Dwarf_Die *die_mem,
 				     int *offset);
 
+/* Get the frame base information from CFA */
+int die_get_cfa(Dwarf *dwarf, u64 pc, int *preg, int *poffset);
+
 #else /*  HAVE_DWARF_GETLOCATIONS_SUPPORT */
 
 static inline int die_get_var_range(Dwarf_Die *sp_die __maybe_unused,
@@ -173,6 +176,12 @@ static inline Dwarf_Die *die_find_variable_by_addr(Dwarf_Die *sc_die __maybe_unu
 						   int *offset __maybe_unused)
 {
 	return NULL;
+}
+
+static inline int die_get_cfa(Dwarf *dwarf __maybe_unused, u64 pc __maybe_unused,
+			      int *preg __maybe_unused, int *poffset __maybe_unused)
+{
+	return -1;
 }
 
 #endif /* HAVE_DWARF_GETLOCATIONS_SUPPORT */
