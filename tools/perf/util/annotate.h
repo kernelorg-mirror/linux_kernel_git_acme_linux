@@ -512,6 +512,10 @@ void get_global_var_info(struct thread *thread, struct map_symbol *ms, u64 ip,
 			 struct disasm_line *dl, u8 cpumode, u64 *var_addr,
 			 const char **var_name, int *poffset);
 
+void get_percpu_var_info(struct thread *thread, struct map_symbol *ms,
+			 u8 cpumode, u64 var_addr, const char **var_name,
+			 int *poffset);
+
 /**
  * struct annotated_basic_block - Basic block of instructions
  * @list: List node

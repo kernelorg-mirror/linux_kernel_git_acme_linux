@@ -3767,6 +3767,27 @@ void get_global_var_info(struct thread *thread, struct map_symbol *ms, u64 ip,
 	addr_location__exit(&al);
 }
 
+void get_percpu_var_info(struct thread *thread, struct map_symbol *ms,
+			 u8 cpumode, u64 var_addr, const char **var_name,
+			 int *poffset)
+{
+	struct addr_location al;
+	struct symbol *var;
+	u64 map_addr;
+
+	/* Kernel symbols might be relocated */
+	map_addr = var_addr + map__reloc(ms->map);
+
+	addr_location__init(&al);
+	var = thread__find_symbol_fb(thread, cpumode, map_addr, &al);
+	if (var) {
+		*var_name = var->name;
+		/* Calculate type offset from the start of variable */
+		*poffset = map_addr - map__unmap_ip(al.map, var->start);
+	}
+	addr_location__exit(&al);
+}
+
 /**
  * hist_entry__get_data_type - find data type for given hist entry
  * @he: hist entry
@@ -3856,6 +3877,16 @@ retry:
 			get_global_var_info(he->thread, ms, ip, dl, he->cpumode,
 					    &dloc.var_addr, &dloc.var_name,
 					    &dloc.type_offset);
+		}
+
+		/* This CPU access in kernel - pretend PC-relative addressing */
+		if (op_loc->reg1 == -1 && ms->map->dso->kernel &&
+		    arch__is(arch, "x86") && op_loc->segment == INSN_SEG_X86_GS) {
+			dloc.var_addr = op_loc->offset;
+			get_percpu_var_info(he->thread, ms, he->cpumode,
+					    dloc.var_addr, &dloc.var_name,
+					    &dloc.type_offset);
+			op_loc->reg1 = DWARF_REG_PC;
 		}
 
 		mem_type = find_data_type(&dloc);
