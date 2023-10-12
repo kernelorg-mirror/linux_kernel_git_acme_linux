@@ -115,6 +115,21 @@ void exit_type_state(struct type_state *state)
 	}
 }
 
+static void debug_print_type_name(Dwarf_Die *die)
+{
+	struct strbuf sb;
+	char *str;
+
+	if (!verbose)
+		return;
+
+	strbuf_init(&sb, 32);
+	__die_get_typename(die, &sb);
+	str = strbuf_detach(&sb, NULL);
+	pr_debug("%s (die:%lx)\n", str, dwarf_dieoffset(die));
+	free(str);
+}
+
 /*
  * Compare type name and size to maintain them in a tree.
  * I'm not sure if DWARF would have information of a single type in many
@@ -401,7 +416,7 @@ static struct type_state_stack *findnew_stack_state(struct type_state *state,
  * is used only at the given location and updates an entry in the table.
  */
 void update_var_state(struct type_state *state, struct data_loc_info *dloc,
-		      u64 addr, struct die_var_type *var_types)
+		      u64 addr, u64 off, struct die_var_type *var_types)
 {
 	Dwarf_Die mem_die;
 	struct die_var_type *var;
@@ -422,14 +437,20 @@ void update_var_state(struct type_state *state, struct data_loc_info *dloc,
 
 		if (var->reg == DWARF_REG_FB) {
 			findnew_stack_state(state, var->offset, &mem_die);
+			pr_debug("var [%lx] stack fbreg (%x, %d) type=", off, var->offset, var->offset);
+			debug_print_type_name(&mem_die);
 		} else if (var->reg == fbreg) {
 			findnew_stack_state(state, var->offset - fb_offset, &mem_die);
+			pr_debug("var [%lx] stack cfa (%x, %d) fb-offset=%d type=", off, var->offset - fb_offset, var->offset - fb_offset, fb_offset);
+			debug_print_type_name(&mem_die);
 		} else if (has_reg_type(state, var->reg) && var->offset == 0) {
 			struct type_state_reg *reg;
 
 			reg = &state->regs[var->reg];
 			reg->type = mem_die;
 			reg->ok = true;
+			pr_debug("var [%lx] reg%d type=", off, var->reg);
+			debug_print_type_name(&mem_die);
 		}
 	}
 }
@@ -509,6 +530,8 @@ void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
 		    die_get_real_type(&func_die, &type_die)) {
 			state->regs[state->ret_reg].type = type_die;
 			state->regs[state->ret_reg].ok = true;
+			pr_debug("fun [%lx] reg0 return from %s type=", dl->al.offset, dwarf_diename(&func_die));
+			debug_print_type_name(&type_die);
 		}
 		return;
 	}
@@ -517,8 +540,10 @@ void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
 	if (!strstr(dl->ins.name, "mov"))
 		return;
 
-	if (annotate_get_insn_location(dloc->arch, dl, &loc) < 0)
+	if (annotate_get_insn_location(dloc->arch, dl, &loc) < 0) {
+		pr_debug("failed to get mov insn loc\n");
 		return;
+	}
 
 	if (dloc->fb_cfa) {
 		u64 ip = dloc->ms->sym->start + dl->al.offset;
@@ -533,10 +558,14 @@ void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
 		if (!has_reg_type(state, dst->reg1))
 			return;
 
-		if (has_reg_type(state, src->reg1))
+		if (has_reg_type(state, src->reg1)) {
 			state->regs[dst->reg1] = state->regs[src->reg1];
-		else if (dloc->ms->map->dso->kernel &&
-			 src->segment == INSN_SEG_X86_GS) {
+			if (state->regs[dst->reg1].ok) {
+				pr_debug("mov [%lx] reg%d -> reg%d type=", dl->al.offset, src->reg1, dst->reg1);
+				debug_print_type_name(&state->regs[dst->reg1].type);
+			}
+		} else if (dloc->ms->map->dso->kernel &&
+			   src->segment == INSN_SEG_X86_GS) {
 			struct map_symbol *ms = dloc->ms;
 			int offset = src->offset;
 			u64 ip = ms->sym->start + dl->al.offset;
@@ -556,6 +585,8 @@ void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
 						var_name, offset, &type_die)) {
 				state->regs[dst->reg1].type = type_die;
 				state->regs[dst->reg1].ok = true;
+				pr_debug("mov [%lx] percpu -> reg%d type=", dl->al.offset, dst->reg1);
+				debug_print_type_name(&state->regs[dst->reg1].type);
 			}
 		} else
 			state->regs[dst->reg1].ok = false;
@@ -586,8 +617,13 @@ retry:
 						var_name, offset, &type_die)) {
 				state->regs[dst->reg1].type = type_die;
 				state->regs[dst->reg1].ok = true;
-			} else
+				pr_debug("mov [%lx] PC-rel -> reg%d type=", dl->al.offset, dst->reg1);
+				debug_print_type_name(&type_die);
+			} else {
+				if (var_name)
+					pr_debug("??? [%lx] PC-rel (%lx: %s%+d)\n", dl->al.offset, var_addr, var_name, offset);
 				state->regs[dst->reg1].ok = false;
+			}
 		}
 		/* And check stack variables with offset */
 		else if (sreg == fbreg) {
@@ -600,6 +636,8 @@ retry:
 							 &type_die)) {
 				state->regs[dst->reg1].type = type_die;
 				state->regs[dst->reg1].ok = true;
+				pr_debug("mov [%lx] stack (-%#x, %d) -> reg%d type=", dl->al.offset, -offset, offset, dst->reg1);
+				debug_print_type_name(&type_die);
 			} else
 				state->regs[dst->reg1].ok = false;
 		}
@@ -609,6 +647,8 @@ retry:
 					    src->offset, &type_die)) {
 			state->regs[dst->reg1].type = type_die;
 			state->regs[dst->reg1].ok = true;
+			pr_debug("mov [%lx] %#x(reg%d) -> reg%d type=", dl->al.offset, src->offset, sreg, dst->reg1);
+			debug_print_type_name(&type_die);
 		}
 		/* Or try another register if any */
 		else if (src->multi_regs && sreg == src->reg1 &&
@@ -648,6 +688,8 @@ retry:
 				findnew_stack_state(state, offset,
 						    &state->regs[src->reg1].type);
 			}
+			pr_debug("mov [%lx] reg%d -> stack (-%#x, %d) type=", dl->al.offset, src->reg1, -offset, offset);
+			debug_print_type_name(&state->regs[src->reg1].type);
 		}
 		/*
 		 * Ignore other transfers since it'd set a value in a struct
@@ -751,6 +793,9 @@ static bool find_matching_type(struct type_state *state,
 		    (unsigned)dloc->type_offset >= size)
 			return false;
 
+		pr_debug("%s: [%lx] reg=%d offset=%d type=",
+			 __func__, dloc->ip - dloc->ms->sym->start, reg, dloc->type_offset);
+		debug_print_type_name(type_die);
 		return true;
 	}
 
@@ -764,6 +809,10 @@ static bool find_matching_type(struct type_state *state,
 		*type_die = stack->type;
 		/* Update the type offset from the start of slot */
 		dloc->type_offset -= stack->offset;
+
+		pr_debug("%s: [%lx] stack offset=%d type=",
+			 __func__, dloc->ip - dloc->ms->sym->start, dloc->type_offset);
+		debug_print_type_name(type_die);
 		return true;
 	}
 
@@ -785,6 +834,11 @@ static bool find_matching_type(struct type_state *state,
 		*type_die = stack->type;
 		/* Update the type offset from the start of slot */
 		dloc->type_offset -= fboff + stack->offset;
+
+		pr_debug("%s: [%lx] cfa stack offset=%d type_offset=%d type=",
+			 __func__, dloc->ip - dloc->ms->sym->start,
+			 dloc->type_offset + stack->offset, dloc->type_offset);
+		debug_print_type_name(type_die);
 		return true;
 	}
 
@@ -808,12 +862,13 @@ static bool find_data_type_insn(struct data_loc_info *dloc, int reg,
 	list_for_each_entry(bb, basic_blocks, list) {
 		struct disasm_line *dl = bb->begin;
 
+		pr_debug("bb: [%lx - %lx]\n", bb->begin->al.offset, bb->end->al.offset);
 		list_for_each_entry_from(dl, &notes->src->source, al.node) {
 			u64 this_ip = sym->start + dl->al.offset;
 			u64 addr = map__rip_2objdump(dloc->ms->map, this_ip);
 
 			/* Update variable type at this address */
-			update_var_state(&state, dloc, addr, var_types);
+			update_var_state(&state, dloc, addr, dl->al.offset, var_types);
 
 			if (this_ip == dloc->ip) {
 				found = find_matching_type(&state, dloc, reg,
@@ -846,6 +901,16 @@ static int find_data_type_block(struct data_loc_info *dloc, int reg,
 	u64 src_ip, dst_ip;
 	int ret = -1;
 
+	if (dloc->fb_cfa) {
+		u64 pc = map__rip_2objdump(dloc->ms->map, dloc->ip);
+		int fbreg, fboff;
+
+		if (die_get_cfa(dloc->di->dbg, pc, &fbreg, &fboff) < 0)
+			fbreg = -1;
+
+		pr_debug("CFA reg=%d offset=%d\n", fbreg, fboff);
+	}
+
 	dst_ip = dloc->ip;
 	for (int i = nr_scopes - 1; i >= 0; i--) {
 		Dwarf_Addr base, start, end;
@@ -854,12 +919,16 @@ static int find_data_type_block(struct data_loc_info *dloc, int reg,
 		if (dwarf_ranges(&scopes[i], 0, &base, &start, &end) < 0)
 			break;
 
+		pr_debug("scope: [%d/%d] (die:%lx)\n", i + 1, nr_scopes, dwarf_dieoffset(&scopes[i]));
 		src_ip = map__objdump_2rip(dloc->ms->map, start);
 
 		/* Get basic blocks for this scope */
 		if (annotate_get_basic_blocks(dloc->ms->sym, src_ip, dst_ip,
-					      &this_blocks) < 0)
+					      &this_blocks) < 0) {
+			pr_debug("cannot find a basic block from %lx to %lx\n",
+				 src_ip - dloc->ms->sym->start, dst_ip - dloc->ms->sym->start);
 			continue;
+		}
 		prepend_basic_blocks(&this_blocks, &basic_blocks);
 
 		/* Get variable info for this scope and add to var_types list */
@@ -895,6 +964,18 @@ static int find_data_type_die(struct data_loc_info *dloc, Dwarf_Die *type_die)
 	int fb_offset = 0;
 	bool is_fbreg = false;
 	u64 pc;
+	char buf[64];
+
+	if (dloc->op->multi_regs)
+		snprintf(buf, sizeof(buf), " or reg%d", dloc->op->reg2);
+	else if (dloc->op->reg1 == DWARF_REG_PC)
+		snprintf(buf, sizeof(buf), " (PC)");
+	else
+		buf[0] = '\0';
+
+	pr_debug("-----------------------------------------------------------\n");
+	pr_debug("%s [%lx] for reg%d%s in %s\n", __func__, dloc->ip - dloc->ms->sym->start,
+		 dloc->op->reg1, buf, dloc->ms->sym->name);
 
 	/*
 	 * IP is a relative instruction address from the start of the map, as
@@ -913,11 +994,15 @@ static int find_data_type_die(struct data_loc_info *dloc, Dwarf_Die *type_die)
 	reg = loc->reg1;
 	offset = loc->offset;
 
+	pr_debug("CU die offset: %lx\n", dwarf_dieoffset(&cu_die));
+
 	if (reg == DWARF_REG_PC) {
 		if (die_find_variable_by_addr(&cu_die, pc, dloc->var_addr,
 					      &var_die, &offset)) {
 			ret = check_variable(&var_die, type_die, offset,
 					     /*is_pointer=*/false);
+			if (ret == 0)
+				pr_debug("found PC-rel by addr=%lx offset=%d\n", dloc->var_addr, offset);
 			dloc->type_offset = offset;
 			goto out;
 		}
@@ -926,6 +1011,8 @@ static int find_data_type_die(struct data_loc_info *dloc, Dwarf_Die *type_die)
 		    die_find_variable_at(&cu_die, dloc->var_name, pc, &var_die)) {
 			ret = check_variable(&var_die, type_die, dloc->type_offset,
 					     /*is_pointer=*/false);
+			if (ret == 0)
+				pr_debug("found \"%s\" by name offset=%d\n", dloc->var_name, dloc->type_offset);
 			/* dloc->type_offset was updated by the caller */
 			goto out;
 		}
@@ -978,6 +1065,21 @@ retry:
 		/* Found a variable, see if it's correct */
 		ret = check_variable(&var_die, type_die, offset,
 				     reg != DWARF_REG_PC && !is_fbreg);
+		if (ret == 0) {
+#if 0
+			const char *filename;
+			int lineno;
+
+			if (cu_find_lineinfo(&cu_die, pc, &filename, &lineno) < 0) {
+				filename = "unknown";
+				lineno = 0;
+			}
+#endif
+			pr_debug("found \"%s\" in scope=%d/%d reg=%d offset=%#x (%d) loc->offset=%d fb-offset=%d (die:%lx scope:%lx) type=",
+				 dwarf_diename(&var_die), i+1, nr_scopes, reg, offset, offset, loc->offset, fb_offset, dwarf_dieoffset(&var_die),
+				 dwarf_dieoffset(&scopes[i])/*, filename, lineno*/);
+			debug_print_type_name(type_die);
+		}
 		dloc->type_offset = offset;
 		goto out;
 	}
@@ -994,8 +1096,10 @@ retry:
 		goto retry;
 	}
 
-	if (ret < 0)
+	if (ret < 0) {
+		pr_debug("no variable found\n");
 		ann_data_stat.no_var++;
+	}
 
 out:
 	free(scopes);

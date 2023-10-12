@@ -166,7 +166,7 @@ void exit_type_state(struct type_state *state);
 
 /* Update type state table using variables */
 void update_var_state(struct type_state *state, struct data_loc_info *dloc,
-		      u64 addr, struct die_var_type *var_types);
+		      u64 addr, u64 off, struct die_var_type *var_types);
 
 /* Update type state table for an instruction */
 void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
