@@ -11,6 +11,7 @@ struct annotated_op_loc;
 struct arch;
 struct debuginfo;
 struct die_var_type;
+struct disasm_line;
 struct evsel;
 struct map_symbol;
 struct type_state;
@@ -78,6 +79,7 @@ extern struct annotated_data_type stackop_type;
 
 /**
  * struct data_loc_info - Data location information
+ * @arch: architecture info
  * @ms: Map and Symbol info
  * @ip: Instruction address
  * @var_addr: Data address (for global variables)
@@ -90,6 +92,7 @@ extern struct annotated_data_type stackop_type;
  */
 struct data_loc_info {
 	/* These are input field, should be filled by caller */
+	struct arch *arch;
 	struct map_symbol *ms;
 	u64 ip;
 	u64 var_addr;
@@ -159,6 +162,10 @@ void exit_type_state(struct type_state *state);
 void update_var_state(struct type_state *state, struct data_loc_info *dloc,
 		      u64 addr, struct die_var_type *var_types);
 
+/* Update type state table for an instruction */
+void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
+		       struct disasm_line *dl);
+
 #else /* HAVE_DWARF_SUPPORT */
 
 static inline struct annotated_data_type *
@@ -194,6 +201,12 @@ static inline void update_var_state(struct type_state *state __maybe_unused,
 				    struct data_loc_info *dloc __maybe_unused,
 				    u64 addr __maybe_unused,
 				    struct die_var_type *var_types __maybe_unused)
+{
+}
+
+static inline void update_insn_state(struct type_state *state __maybe_unused,
+				     struct data_loc_info *dloc __maybe_unused,
+				     struct disasm_line *dl __maybe_unused)
 {
 }
 
