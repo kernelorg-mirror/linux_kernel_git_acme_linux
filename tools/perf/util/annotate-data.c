@@ -17,6 +17,11 @@
 #include "strbuf.h"
 #include "symbol.h"
 
+/* Pseudo data types */
+struct annotated_data_type unknown_type = {
+	.type_name = (char *)"(unknown)",
+};
+
 /*
  * Compare type name and size to maintain them in a tree.
  * I'm not sure if DWARF would have information of a single type in many

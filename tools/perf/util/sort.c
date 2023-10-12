@@ -24,6 +24,7 @@
 #include "strbuf.h"
 #include "mem-events.h"
 #include "annotate.h"
+#include "annotate-data.h"
 #include "event.h"
 #include "time-utils.h"
 #include "cgroup.h"
@@ -2094,7 +2095,7 @@ struct sort_entry sort_dso_size = {
 	.se_width_idx	= HISTC_DSO_SIZE,
 };
 
-/* --sort dso_size */
+/* --sort addr */
 
 static int64_t
 sort__addr_cmp(struct hist_entry *left, struct hist_entry *right)
@@ -2131,6 +2132,66 @@ struct sort_entry sort_addr = {
 	.se_width_idx	= HISTC_ADDR,
 };
 
+#ifdef HAVE_DWARF_SUPPORT
+/* --sort type */
+
+static int64_t
+sort__type_cmp(struct hist_entry *left, struct hist_entry *right)
+{
+	return sort__addr_cmp(left, right);
+}
+
+static void sort__type_init(struct hist_entry *he)
+{
+	if (he->mem_type)
+		return;
+
+	he->mem_type = hist_entry__get_data_type(he);
+	if (he->mem_type == NULL)
+		he->mem_type = &unknown_type;
+}
+
+static int64_t
+sort__type_collapse(struct hist_entry *left, struct hist_entry *right)
+{
+	struct annotated_data_type *left_type = left->mem_type;
+	struct annotated_data_type *right_type = right->mem_type;
+
+	if (!left_type) {
+		sort__type_init(left);
+		left_type = left->mem_type;
+	}
+
+	if (!right_type) {
+		sort__type_init(right);
+		right_type = right->mem_type;
+	}
+
+	return strcmp(left_type->type_name, right_type->type_name);
+}
+
+static int64_t
+sort__type_sort(struct hist_entry *left, struct hist_entry *right)
+{
+	return sort__type_collapse(left, right);
+}
+
+static int hist_entry__type_snprintf(struct hist_entry *he, char *bf,
+				     size_t size, unsigned int width)
+{
+	return repsep_snprintf(bf, size, "%-*s", width, he->mem_type->type_name);
+}
+
+struct sort_entry sort_type = {
+	.se_header	= "Data Type",
+	.se_cmp		= sort__type_cmp,
+	.se_collapse	= sort__type_collapse,
+	.se_sort	= sort__type_sort,
+	.se_init	= sort__type_init,
+	.se_snprintf	= hist_entry__type_snprintf,
+	.se_width_idx	= HISTC_TYPE,
+};
+#endif // HAVE_DWARF_SUPPORT
 
 struct sort_dimension {
 	const char		*name;
@@ -2185,7 +2246,10 @@ static struct sort_dimension common_sort_dimensions[] = {
 	DIM(SORT_ADDR, "addr", sort_addr),
 	DIM(SORT_LOCAL_RETIRE_LAT, "local_retire_lat", sort_local_p_stage_cyc),
 	DIM(SORT_GLOBAL_RETIRE_LAT, "retire_lat", sort_global_p_stage_cyc),
-	DIM(SORT_SIMD, "simd", sort_simd)
+	DIM(SORT_SIMD, "simd", sort_simd),
+#ifdef HAVE_DWARF_SUPPORT
+	DIM(SORT_ANNOTATE_DATA_TYPE, "type", sort_type),
+#endif
 };
 
 #undef DIM
