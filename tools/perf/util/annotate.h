@@ -490,5 +490,9 @@ struct annotated_item_stat {
 };
 extern struct list_head ann_insn_stat;
 
+/* Calculate PC-relative address */
+u64 annotate_calc_pcrel(struct map_symbol *ms, u64 ip, int offset,
+			struct disasm_line *dl);
+
 #endif /* HAVE_DWARF_SUPPORT */
 #endif	/* __PERF_ANNOTATE_H */
