@@ -8,9 +8,12 @@
 #include <linux/types.h>
 
 struct annotated_op_loc;
+struct arch;
 struct debuginfo;
+struct die_var_type;
 struct evsel;
 struct map_symbol;
+struct type_state;
 
 /**
  * struct annotated_member - Type of member field
@@ -146,6 +149,16 @@ int annotated_data_type__update_samples(struct annotated_data_type *adt,
 /* Release all data type information in the tree */
 void annotated_data_type__tree_delete(struct rb_root *root);
 
+/* Initialize type state table */
+void init_type_state(struct type_state *state, struct arch *arch);
+
+/* Destroy type state table */
+void exit_type_state(struct type_state *state);
+
+/* Update type state table using variables */
+void update_var_state(struct type_state *state, struct data_loc_info *dloc,
+		      u64 addr, struct die_var_type *var_types);
+
 #else /* HAVE_DWARF_SUPPORT */
 
 static inline struct annotated_data_type *
@@ -165,6 +178,22 @@ annotated_data_type__update_samples(struct annotated_data_type *adt __maybe_unus
 }
 
 static inline void annotated_data_type__tree_delete(struct rb_root *root __maybe_unused)
+{
+}
+
+static inline void init_type_state(struct type_state *state __maybe_unused,
+				   struct arch *arch __maybe_unused)
+{
+}
+
+static inline void exit_type_state(struct type_state *state __maybe_unused)
+{
+}
+
+static inline void update_var_state(struct type_state *state __maybe_unused,
+				    struct data_loc_info *dloc __maybe_unused,
+				    u64 addr __maybe_unused,
+				    struct die_var_type *var_types __maybe_unused)
 {
 }
 
