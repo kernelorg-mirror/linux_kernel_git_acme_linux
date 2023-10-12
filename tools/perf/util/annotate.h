@@ -23,6 +23,7 @@ struct option;
 struct perf_sample;
 struct evsel;
 struct symbol;
+struct thread;
 struct annotated_data_type;
 
 struct ins {
@@ -493,6 +494,10 @@ extern struct list_head ann_insn_stat;
 /* Calculate PC-relative address */
 u64 annotate_calc_pcrel(struct map_symbol *ms, u64 ip, int offset,
 			struct disasm_line *dl);
+
+void get_global_var_info(struct thread *thread, struct map_symbol *ms, u64 ip,
+			 struct disasm_line *dl, u8 cpumode, u64 *var_addr,
+			 const char **var_name, int *poffset);
 
 /**
  * struct annotated_basic_block - Basic block of instructions

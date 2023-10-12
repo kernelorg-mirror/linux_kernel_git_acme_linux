@@ -413,6 +413,7 @@ void update_var_state(struct type_state *state, struct data_loc_info *dloc,
  * update_insn_state - Update type state for an instruction
  * @state: type state table
  * @dloc: data location info
+ * @cu_die: compile unit debug entry
  * @dl: disasm line for the instruction
  *
  * This function updates the @state table for the target operand of the
@@ -424,7 +425,7 @@ void update_var_state(struct type_state *state, struct data_loc_info *dloc,
  * are true.
  */
 void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
-		       struct disasm_line *dl)
+		       void *cu_die, struct disasm_line *dl)
 {
 	struct annotated_insn_loc loc;
 	struct annotated_op_loc *src = &loc.ops[INSN_OP_SOURCE];
@@ -466,8 +467,46 @@ void update_insn_state(struct type_state *state, struct data_loc_info *dloc,
 			return;
 
 retry:
-		/* Check stack variables with offset */
-		if (sreg == fbreg) {
+		/* Check if it's a global variable */
+		if (sreg == DWARF_REG_PC) {
+			Dwarf_Die var_die;
+			struct map_symbol *ms = dloc->ms;
+			int offset = src->offset;
+			u64 ip = ms->sym->start + dl->al.offset;
+			u64 pc, addr;
+			const char *var_name = NULL;
+
+			addr = annotate_calc_pcrel(ms, ip, offset, dl);
+			pc = map__rip_2objdump(ms->map, ip);
+
+			if (die_find_variable_by_addr(cu_die, pc, addr,
+						      &var_die, &offset) &&
+			    check_variable(&var_die, &type_die, offset,
+					   /*is_pointer=*/false) == 0 &&
+			    die_get_member_type(&type_die, offset, &type_die)) {
+				state->regs[dst->reg1].type = type_die;
+				state->regs[dst->reg1].ok = true;
+				return;
+			}
+
+			/* Try to get the name of global variable */
+			offset = src->offset;
+			get_global_var_info(dloc->thread, ms, ip, dl,
+					    dloc->cpumode, &addr,
+					    &var_name, &offset);
+
+			if (var_name && die_find_variable_at(cu_die, var_name,
+							     pc, &var_die) &&
+			    check_variable(&var_die, &type_die, offset,
+					   /*is_pointer=*/false) == 0 &&
+			    die_get_member_type(&type_die, offset, &type_die)) {
+				state->regs[dst->reg1].type = type_die;
+				state->regs[dst->reg1].ok = true;
+			} else
+				state->regs[dst->reg1].ok = false;
+		}
+		/* And check stack variables with offset */
+		else if (sreg == fbreg) {
 			struct type_state_stack *stack;
 			int offset = src->offset - fboff;
 
