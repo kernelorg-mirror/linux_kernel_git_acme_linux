@@ -990,6 +990,54 @@ static size_t btf_enum_scnprintf(const struct btf_type *type, struct btf *btf, c
 	return 0;
 }
 
+struct trace_btf_dump_snprintf_ctx {
+	char   *bf;
+	size_t printed, size;
+};
+
+static void trace__btf_dump_snprintf(void *vctx, const char *fmt, va_list args)
+{
+	struct trace_btf_dump_snprintf_ctx *ctx = vctx;
+
+	ctx->printed += vscnprintf(ctx->bf + ctx->printed, ctx->size - ctx->printed, fmt, args);
+}
+
+static size_t btf_struct_scnprintf(const struct btf_type *type, struct btf *btf, char *bf, size_t size, struct syscall_arg *arg)
+{
+	struct trace_btf_dump_snprintf_ctx ctx = {
+		.bf   = bf,
+		.size = size,
+	};
+	struct augmented_arg *augmented_arg = arg->augmented.args;
+	int type_id = arg->fmt->type_id, consumed;
+	struct btf_dump *btf_dump;
+
+	LIBBPF_OPTS(btf_dump_opts, dump_opts);
+	LIBBPF_OPTS(btf_dump_type_data_opts, dump_data_opts);
+
+	if (arg == NULL || arg->augmented.args == NULL)
+		return 0;
+
+	dump_data_opts.compact     = true;
+	dump_data_opts.skip_names  = true;
+
+	btf_dump = btf_dump__new(btf, trace__btf_dump_snprintf, &ctx, &dump_opts);
+	if (btf_dump == NULL)
+		return 0;
+
+	/* pretty print the struct data here */
+	if (btf_dump__dump_type_data(btf_dump, type_id, arg->augmented.args->value, type->size, &dump_data_opts) == 0)
+		return 0;
+
+	consumed = sizeof(*augmented_arg) + augmented_arg->size;
+	arg->augmented.args = ((void *)arg->augmented.args) + consumed;
+	arg->augmented.size -= consumed;
+
+	btf_dump__free(btf_dump);
+
+	return ctx.printed;
+}
+
 static size_t trace__btf_scnprintf(struct trace *trace, struct syscall_arg *arg, char *bf,
 				   size_t size, int val, char *type)
 {
@@ -1009,6 +1057,8 @@ static size_t trace__btf_scnprintf(struct trace *trace, struct syscall_arg *arg,
 
 	if (btf_is_enum(arg_fmt->type))
 		return btf_enum_scnprintf(arg_fmt->type, trace->btf, bf, size, val);
+	else if (btf_is_struct(arg_fmt->type))
+		return btf_struct_scnprintf(arg_fmt->type, trace->btf, bf, size, arg);
 
 	return 0;
 }
