@@ -732,7 +732,7 @@ static void make_histogram(struct perf_ftrace *ftrace, int buckets[],
 	char *p, *q;
 	char *unit;
 	double num;
-	int i;
+	int i, min_latency = ftrace->min_latency;
 
 	/* ensure NUL termination */
 	buf[len] = '\0';
@@ -777,6 +777,12 @@ static void make_histogram(struct perf_ftrace *ftrace, int buckets[],
 		if (ftrace->use_nsec)
 			num *= 1000;
 
+		i = 0;
+		if (num < min_latency)
+			goto do_inc;
+
+		num -= min_latency;
+
 		if (!ftrace->bucket_range) {
 			i = log2(num);
 			if (i < 0)
@@ -784,13 +790,13 @@ static void make_histogram(struct perf_ftrace *ftrace, int buckets[],
 		} else {
 			// Less than 1 unit (ms or ns), or, in the future,
 			// than the min latency desired.
-			i = 0;
 			if (num > 0) // 1st entry: [ 1 unit .. bucket_range units ]
 				i = ((num - 1) / ftrace->bucket_range) + 1;
 		}
 		if (i >= NUM_BUCKET)
 			i = NUM_BUCKET - 1;
 
+do_inc:
 		buckets[i]++;
 
 next:
@@ -805,6 +811,7 @@ next:
 static void display_histogram(struct perf_ftrace *ftrace, int buckets[])
 {
 	bool use_nsec = ftrace->use_nsec;
+	int min_latency = ftrace->min_latency;
 	int i;
 	int total = 0;
 	int bar_total = 46;  /* to fit in 80 column */
@@ -825,9 +832,9 @@ static void display_histogram(struct perf_ftrace *ftrace, int buckets[])
 	bar_len = buckets[0] * bar_total / total;
 
 	if (!ftrace->bucket_range)
-		printf("  %4d - %4d %s", 0, 1, use_nsec ? "ns" : "us");
+		printf("  %4d - %4d %s", 0, min_latency, use_nsec ? "ns" : "us");
 	else
-		printf("  %4s - %4d %s", "...", 999, use_nsec ? "ps" : "ns");
+		printf("  %4s - %4d %s", "...", min_latency ?: 999, min_latency ? (use_nsec ? "ns" : "ms") : (use_nsec ? "ps" : "ns"));
 
 	printf(" | %10d | %.*s%*s |\n", buckets[0], bar_len, bar, bar_total - bar_len, "");
 
@@ -839,6 +846,9 @@ static void display_histogram(struct perf_ftrace *ftrace, int buckets[])
 			start = (1 << (i - 1));
 			stop  = 1 << i;;
 
+			start += min_latency;
+			stop += min_latency;
+
 			if (start >= 1024) {
 				start >>= 10;
 				stop >>= 10;
@@ -847,6 +857,9 @@ static void display_histogram(struct perf_ftrace *ftrace, int buckets[])
 		} else {
 			start = (i - 1) * ftrace->bucket_range + 1;
 			stop  = i * ftrace->bucket_range;
+
+			start += min_latency;
+			stop += min_latency;
 
 			if (start > 1000) {
 				double dstart = start / 1000.0 + 0.01,
@@ -868,7 +881,7 @@ print_bucket_info:
 	if (!ftrace->bucket_range) {
 		printf("  %4d - %-4s %s", 1, "...", use_nsec ? "ms" : "s ");
 	} else {
-		int upper_outlier_start = (NUM_BUCKET - 2) * ftrace->bucket_range;
+		int upper_outlier_start = (NUM_BUCKET - 2) * ftrace->bucket_range + min_latency;
 
 		if (upper_outlier_start > 1000) {
 			double dstart = upper_outlier_start / 1000.0 + 0.01;
@@ -1601,6 +1614,8 @@ int cmd_ftrace(int argc, const char **argv)
 		    "Use nano-second histogram"),
 	OPT_UINTEGER(0, "bucket_range", &ftrace.bucket_range,
 		    "Bucket range in ms or ns (according to -n/--use-nsec), default is log2() mode"),
+	OPT_UINTEGER(0, "min_latency", &ftrace.min_latency,
+		    "Minimum latency of interest, values below this will be in the first bucket."),
 	OPT_PARENT(common_options),
 	};
 	const struct option profile_options[] = {
