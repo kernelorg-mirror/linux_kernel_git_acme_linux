@@ -4,6 +4,10 @@
 
 #include "tests.h"
 
+struct shell_info {
+	const char *base_path;
+};
+
 struct test_suite **create_script_test_suites(void);
 
 #endif /* TESTS_SCRIPTS_H */
