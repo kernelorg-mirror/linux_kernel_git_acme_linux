@@ -138,6 +138,12 @@ static bool is_test_script(int dir_fd, const char *name)
 	return is_shell_script(dir_fd, name);
 }
 
+/* Filter for scandir */
+static int setup_filter(const struct dirent *entry)
+{
+	return strcmp(entry->d_name, SHELL_SETUP);
+}
+
 /* Duplicate a string and fall over and die if we run out of memory */
 static char *strdup_check(const char *str)
 {
@@ -175,6 +181,7 @@ static void free_suite(struct test_suite *suite) {
 
 static int shell_test__run(struct test_suite *test, int subtest)
 {
+	struct shell_info *test_info = test->priv;
 	const char *file;
 	int err;
 	char *cmd = NULL;
@@ -185,6 +192,22 @@ static int shell_test__run(struct test_suite *test, int subtest)
 	}
 	else {		/* Single test case */
 		file = test->test_cases[0].name;
+	}
+
+	/* Run setup if needed */
+	if (test_info->has_setup == RUN_SETUP) {
+		char *setup_script;
+
+		if (asprintf(&setup_script, "%s%s%s", test_info->base_path, SHELL_SETUP, verbose ? " -v" : "") < 0)
+			return TEST_SETUP_FAIL;
+
+		err = system(setup_script);
+		free(setup_script);
+
+		if (err)
+			return TEST_SETUP_FAIL;
+	} else if (test_info->has_setup == FAILED_SETUP) {
+		return TEST_SKIP; /* Skip test suite if setup failed */
 	}
 
 	if (asprintf(&cmd, "%s%s", file, verbose ? " -v" : "") < 0)
@@ -228,6 +251,7 @@ static struct test_suite* prepare_test_suite(int dir_fd)
 	}
 
 	test_info->base_path = strdup_check(dirpath);		/* Absolute path to dir */
+	test_info->has_setup = NO_SETUP;
 
 	test_suite->priv = test_info;
 	test_suite->desc = NULL;
@@ -309,7 +333,7 @@ static void append_scripts_in_subdir(int dir_fd,
 	int n_dirs, i;
 
 	/* List files, sorted by alpha */
-	n_dirs = scandirat(dir_fd, ".", &entlist, NULL, alphasort);
+	n_dirs = scandirat(dir_fd, ".", &entlist, setup_filter, alphasort);
 	if (n_dirs == -1)
 		return;
 	for (i = 0; i < n_dirs && (ent = entlist[i]); i++) {
@@ -404,7 +428,14 @@ static void append_suits_in_dir(int dir_fd,
 			continue;
 		}
 
-		test_suite->desc = strdup_check(ent->d_name);	/* If no setup, set name to the directory */
+		if (is_test_script(fd, SHELL_SETUP)) {	/* Check for setup existance */
+			char *desc = shell_test__description(fd, SHELL_SETUP);
+			test_suite->desc = desc;	/* Set the suite name by the setup description */
+			((struct shell_info*)(test_suite->priv))->has_setup = RUN_SETUP;
+		}
+		else {
+			test_suite->desc = strdup_check(ent->d_name);	/* If no setup, set name to the directory */
+		}
 
 		append_suite(result, result_sz, test_suite);
 	}
