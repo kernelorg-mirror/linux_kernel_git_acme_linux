@@ -1090,11 +1090,9 @@ static struct btf *btf_new(const void *data, __u32 size, struct btf *base_btf, b
 	err = btf_parse_str_sec(btf);
 	err = err ?: btf_parse_type_sec(btf);
 	err = err ?: btf_sanity_check(btf);
-	if (err)
-		goto done;
 
-done:
 	if (err) {
+done:
 		btf__free(btf);
 		return ERR_PTR(err);
 	}
