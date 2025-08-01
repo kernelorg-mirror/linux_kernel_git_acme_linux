@@ -124,6 +124,9 @@ struct btf {
 	/* whether raw_data is a (read-only) mmap */
 	bool raw_data_is_mmap;
 
+	/* Wheter there was more data after the end of strings */
+	bool extra_raw_data;
+
 	/* BTF object FD, if loaded into kernel */
 	int fd;
 
@@ -225,10 +228,9 @@ static void btf_bswap_hdr(struct btf_header *h)
 	h->str_len = bswap_32(h->str_len);
 }
 
-static int btf_parse_hdr(struct btf *btf)
+static int btf_parse_hdr(struct btf *btf, struct btf_header *hdr)
 {
-	struct btf_header *hdr = btf->hdr;
-	__u32 meta_left;
+	__u32 meta_left, raw_size;
 
 	if (btf->raw_size < sizeof(struct btf_header)) {
 		pr_debug("BTF header not found\n");
@@ -269,6 +271,18 @@ static int btf_parse_hdr(struct btf *btf)
 	if (hdr->type_off % 4) {
 		pr_debug("BTF type section is not aligned to 4 bytes\n");
 		return -EINVAL;
+	}
+
+	/* If there is more data after the strings, it will not be used,
+	 * so we might as well trim here and don't waste memory.
+	 * This paves the way for a BTF archive, created by default
+	 * by the linker when finding .BTF in multiple .o files.
+	 */
+	raw_size = sizeof(*hdr) + hdr->str_off + hdr->str_len;
+	if (raw_size != btf->raw_size) {
+		pr_debug("BTF raw_size chopped from %u to %u\n", btf->raw_size, raw_size);
+		btf->raw_size = raw_size;
+		btf->extra_raw_data = true;
 	}
 
 	return 0;
@@ -1047,6 +1061,7 @@ struct btf *btf__new_empty_split(struct btf *base_btf)
 
 static struct btf *btf_new(const void *data, __u32 size, struct btf *base_btf, bool is_mmap)
 {
+	struct btf_header hdr;
 	struct btf *btf;
 	int err;
 
@@ -1065,24 +1080,31 @@ static struct btf *btf_new(const void *data, __u32 size, struct btf *base_btf, b
 		btf->start_str_off = base_btf->hdr->str_len;
 	}
 
+	/* We still don't know if this is an archive, i.e. if 'size' is
+	 * the raw_size of a BTF or the sum of all BTFs in an archive,
+	 * it'll be adjusted when we parse the header.
+	 */
+	btf->raw_size = size;
+	memcpy(&hdr, data, sizeof(hdr));
+
+	err = btf_parse_hdr(btf, &hdr);
+	if (err)
+		goto done;
+
 	if (is_mmap) {
 		btf->raw_data = (void *)data;
 		btf->raw_data_is_mmap = true;
 	} else {
-		btf->raw_data = malloc(size);
+		btf->raw_data = malloc(btf->raw_size);
 		if (!btf->raw_data) {
 			err = -ENOMEM;
 			goto done;
 		}
-		memcpy(btf->raw_data, data, size);
+		memcpy(btf->raw_data, data, btf->raw_size);
 	}
 
-	btf->raw_size = size;
-
 	btf->hdr = btf->raw_data;
-	err = btf_parse_hdr(btf);
-	if (err)
-		goto done;
+	memcpy(btf->hdr, &hdr, sizeof(hdr));
 
 	btf->strs_data = btf->raw_data + btf->hdr->hdr_len + btf->hdr->str_off;
 	btf->types_data = btf->raw_data + btf->hdr->hdr_len + btf->hdr->type_off;
