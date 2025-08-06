@@ -1127,6 +1127,44 @@ struct btf *btf__new(const void *data, __u32 size)
 	return libbpf_ptr(btf_new(data, size, NULL, false));
 }
 
+bool btf__is_archive(const struct btf *btf)
+{
+	return btf->extra_raw_data;
+}
+
+int btf__dedup_archive(struct btf *btf, const void *data, __u32 size, const struct btf_dedup_opts *opts)
+{
+	__u32 raw_size = btf->raw_size;
+	struct btf *brother;
+	int err = 0;
+
+	while (size > raw_size) {
+		data += raw_size;
+		size -= raw_size;
+		brother = btf_new(data, size, btf->base_btf, btf->raw_data_is_mmap);
+
+		if (IS_ERR(brother)) {
+			err = PTR_ERR(brother);
+			pr_debug("%s: __btf_new() failed! %d\n", __func__, err);
+			goto out;
+		}
+
+		if (btf__add_btf(btf, brother) < 0) {
+			err = -errno;
+			pr_debug("%s: btf__add_btf() failed: %d(%s)!\n", __func__, errno, strerror(errno));
+			btf__free(brother);
+			goto out;
+		}
+
+		raw_size = brother->raw_size;
+		btf__free(brother);
+	}
+
+	err = btf__dedup(btf, opts);
+out:
+	return libbpf_err(err);
+}
+
 struct btf *btf__new_split(const void *data, __u32 size, struct btf *base_btf)
 {
 	return libbpf_ptr(btf_new(data, size, base_btf, false));

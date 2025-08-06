@@ -258,6 +258,9 @@ struct btf_dedup_opts {
 #define btf_dedup_opts__last_field force_collisions
 
 LIBBPF_API int btf__dedup(struct btf *btf, const struct btf_dedup_opts *opts);
+LIBBPF_API int btf__dedup_archive(struct btf *btf, const void *data, __u32 size,
+				  const struct btf_dedup_opts *opts);
+LIBBPF_API bool btf__is_archive(const struct btf *btf);
 
 /**
  * @brief **btf__relocate()** will check the split BTF *btf* for references
