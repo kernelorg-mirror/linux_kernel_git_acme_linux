@@ -1302,6 +1302,13 @@ static struct btf *btf_parse_elf(const char *path, struct btf *base_btf,
 		err = PTR_ERR(btf);
 		goto done;
 	}
+
+	if (btf__is_archive(btf)) {
+		err = btf__dedup_archive(btf, secs.btf_data->d_buf, secs.btf_data->d_size, NULL);
+		if (err)
+			goto done;
+	}
+
 	if (dist_base_btf && base_btf) {
 		err = btf__relocate(btf, base_btf);
 		if (err)
