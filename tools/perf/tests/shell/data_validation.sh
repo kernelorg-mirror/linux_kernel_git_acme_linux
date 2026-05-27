@@ -8,7 +8,8 @@
 err=0
 
 cleanup() {
-	rm -f "${perfdata}" "${perfdata}.old" "${truncated}" "${stderrfile}"
+	[ -n "${perfdata}" ] && rm -f "${perfdata}" "${perfdata}.old"
+	rm -f "${truncated}" "${stderrfile}"
 	trap - EXIT TERM INT
 }
 trap 'cleanup; exit 1' TERM INT
