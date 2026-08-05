@@ -531,18 +531,79 @@ static void dso__list_add(struct dso *dso) EXCLUSIVE_LOCKS_REQUIRED(_dso__data_o
 	dso__data_open_cnt++;
 }
 
+#ifdef REFCNT_CHECKING
+/*
+ * A deferred put: carries the reference taken by dso__list_add() for an
+ * entry removed from dso__data_open.  Dedicated nodes are used so that
+ * the dso_data's own open_entry node can be relinked by a concurrent
+ * dso__list_add() without corrupting this list or its reference.
+ */
+struct dso_data_put {
+	struct list_head entry;
+	struct dso *dso;
+};
+static LIST_HEAD(dso__data_open_put);
+#endif
+
 static void dso__list_del(struct dso *dso) EXCLUSIVE_LOCKS_REQUIRED(_dso__data_open_lock)
 {
-	list_del_init(&dso__data(dso)->open_entry);
 #ifdef REFCNT_CHECKING
-	mutex_unlock(dso__data_open_lock());
-	dso__put(dso__data(dso)->dso);
-	mutex_lock(dso__data_open_lock());
+	struct dso_data_put *put;
 #endif
+
+	list_del_init(&dso__data(dso)->open_entry);
 	WARN_ONCE(dso__data_open_cnt <= 0,
 		  "DSO data fd counter out of bounds.");
 	dso__data_open_cnt--;
+#ifdef REFCNT_CHECKING
+	/*
+	 * The reference taken in dso__list_add() cannot be dropped while
+	 * holding the open lock: dso__put() may call dso__data_close(),
+	 * which takes dso__data_open_lock itself, deadlocking and leaving
+	 * the list/counter state inconsistent for concurrent threads.
+	 * Transfer the reference to a deferred node drained by
+	 * dso__put_deferred() once the lock is released.
+	 */
+	put = zalloc(sizeof(*put));
+
+	if (put == NULL)
+		return;
+
+	put->dso = dso__data(dso)->dso;
+	dso__data(dso)->dso = NULL;
+	list_add_tail(&put->entry, &dso__data_open_put);
+#endif
 }
+
+#ifdef REFCNT_CHECKING
+/*
+ * Drop the references deferred by dso__list_del().  Must be called
+ * without holding dso__data_open_lock: dso__put() may re-enter it via
+ * dso__data_close().
+ */
+static void dso__put_deferred(void) LOCKS_EXCLUDED(_dso__data_open_lock)
+{
+	for (;;) {
+		struct dso_data_put *put;
+		struct dso *dso;
+
+		mutex_lock(dso__data_open_lock());
+		put = list_first_entry_or_null(&dso__data_open_put, struct dso_data_put, entry);
+		if (put == NULL) {
+			mutex_unlock(dso__data_open_lock());
+			return;
+		}
+		list_del_init(&put->entry);
+		dso = put->dso;
+		mutex_unlock(dso__data_open_lock());
+
+		free(put);
+		dso__put(dso);
+	}
+}
+#else
+static void dso__put_deferred(void) {}
+#endif
 
 static void close_first_dso(void);
 
@@ -805,6 +866,7 @@ void dso__data_close(struct dso *dso)
 	mutex_lock(dso__data_open_lock());
 	close_dso(dso);
 	mutex_unlock(dso__data_open_lock());
+	dso__put_deferred();
 }
 
 static void try_to_open_dso(struct dso *dso, struct machine *machine)
@@ -865,12 +927,14 @@ bool dso__data_get_fd(struct dso *dso, struct machine *machine, int *fd)
 		return true;
 
 	mutex_unlock(dso__data_open_lock());
+	dso__put_deferred();
 	return false;
 }
 
 void dso__data_put_fd(struct dso *dso __maybe_unused)
 {
 	mutex_unlock(dso__data_open_lock());
+	dso__put_deferred();
 }
 
 bool dso__data_status_seen(struct dso *dso, enum dso_data_status_seen by)
@@ -1058,6 +1122,7 @@ static ssize_t file_read(struct dso *dso, struct machine *machine,
 	ret = pread(dso__data(dso)->fd, data, DSO__DATA_CACHE_SIZE, offset);
 out:
 	mutex_unlock(dso__data_open_lock());
+	dso__put_deferred();
 	return ret;
 }
 
@@ -1188,6 +1253,7 @@ static int file_size(struct dso *dso, struct machine *machine)
 
 out:
 	mutex_unlock(dso__data_open_lock());
+	dso__put_deferred();
 	return ret;
 }
 
@@ -1405,6 +1471,7 @@ uint16_t dso__e_machine_endian(struct dso *dso, struct machine *machine, uint32_
 		*e_flags = 0;
 
 	mutex_unlock(dso__data_open_lock());
+	dso__put_deferred();
 	return e_machine;
 }
 
