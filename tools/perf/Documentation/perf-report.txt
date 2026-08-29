@@ -467,6 +467,14 @@ OPTIONS
 	different than the default value of hist entries.  Please see the
 	--call-graph option for details.
 
+--data-type-json=file::
+	Write the data-type access profile as JSON to 'file' (or '-' for
+	stdout) instead of displaying it.  Requires '--sort type' (or
+	'--data-type').  The output is an array of objects, one per data
+	type, consumed by tools like pahole to highlight hot/co-accessed
+	fields and suggest cacheline groups.  The JSON schema is documented
+	in the exporter's header comment in util/annotate-data.c.
+
 --percentage::
 	Determine how to display the CPU and latency overhead percentage
 	of filtered entries. Filters can be applied by --comms, --dsos, --symbols
