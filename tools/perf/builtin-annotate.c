@@ -65,6 +65,7 @@ struct perf_annotate {
 	const char *sym_hist_filter;
 	const char *cpu_list;
 	const char *target_data_type;
+	const char *json_file;
 	DECLARE_BITMAP(cpu_bitmap, MAX_NR_CPUS);
 };
 
@@ -623,6 +624,11 @@ static int __cmd_annotate(struct perf_annotate *ann)
 		goto out;
 	}
 
+	if (ann->json_file) {
+		ret = perf_session__annotate_data_to_json(session, ann->json_file);
+		goto out;
+	}
+
 	/* Display group events together */
 	evlist__for_each_entry(session->evlist, pos) {
 		struct hists *hists = evsel__hists(pos);
@@ -774,6 +780,8 @@ int cmd_annotate(int argc, const char **argv)
 	OPT_CALLBACK_OPTARG(0, "data-type", &annotate, NULL, "name",
 			    "Show data type annotate for the memory accesses",
 			    parse_data_type),
+	OPT_STRING(0, "data-type-json", &annotate.json_file, "file",
+		   "Save data-type profiling histograms as JSON to <file> ('-' for stdout)"),
 	OPT_BOOLEAN(0, "type-stat", &annotate.type_stat,
 		    "Show stats for the data type annotation"),
 	OPT_BOOLEAN(0, "insn-stat", &annotate.insn_stat,
@@ -842,6 +850,11 @@ int cmd_annotate(int argc, const char **argv)
 	}
 #endif
 
+	if (annotate.json_file && !annotate.data_type) {
+		pr_err("--data-type-json requires --data-type\n");
+		return -EINVAL;
+	}
+
 	ret = symbol__validate_sym_arguments();
 	if (ret)
 		return ret;
@@ -909,6 +922,16 @@ int cmd_annotate(int argc, const char **argv)
 		symbol_conf.annotate_data_sample = true;
 	} else if (annotate_opts.code_with_type) {
 		symbol_conf.annotate_data_member = true;
+	}
+
+	if (annotate.json_file) {
+		/*
+		 * JSON export reuses the data-type access histograms, so
+		 * make sure they are populated and force stdio output.
+		 */
+		symbol_conf.annotate_data_member = true;
+		symbol_conf.annotate_data_sample = true;
+		use_browser = 0;
 	}
 
 	setup_browser(true);
