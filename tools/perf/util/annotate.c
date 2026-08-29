@@ -2891,11 +2891,22 @@ __hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
 
 		if (symbol_conf.annotate_data_sample) {
 			struct evsel *evsel = hists_to_evsel(he->hists);
+			/*
+			 * The direction comes from the memory operand of
+			 * the sampled instruction: a store has it as its
+			 * TARGET, a load as its SOURCE.  Some instructions
+			 * (cmp, test, bt, cmov) only read the memory
+			 * operand even when it is in the target slot, so
+			 * they count as loads.
+			 */
+			bool is_store = (i == INSN_OP_TARGET) &&
+					!ins__reads_mem_target(&dl->ins);
 
 			annotated_data_type__update_samples(mem_type, evsel,
 							    dloc.type_offset,
 							    he->stat.nr_events,
-							    he->stat.period);
+							    he->stat.period,
+							    is_store);
 		}
 		*type_offset = dloc.type_offset;
 		return mem_type ?: NO_TYPE;

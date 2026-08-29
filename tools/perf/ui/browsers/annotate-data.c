@@ -44,8 +44,10 @@ static struct annotated_data_browser *get_browser(struct ui_browser *uib)
 static void update_hist_entry(struct type_hist_entry *dst,
 			      struct type_hist_entry *src)
 {
-	dst->nr_samples += src->nr_samples;
-	dst->period += src->period;
+	dst->nr_samples_load += src->nr_samples_load;
+	dst->nr_samples_store += src->nr_samples_store;
+	dst->period_load += src->period_load;
+	dst->period_store += src->period_store;
 }
 
 static int get_member_overhead(struct annotated_data_type *adt,
@@ -367,7 +369,7 @@ static void browser__write_overhead(struct ui_browser *uib,
 				    struct type_hist *total,
 				    struct type_hist_entry *hist, int row)
 {
-	u64 period = hist->period;
+	u64 period = hist->period_load + hist->period_store;
 	double percent = total->period ? (100.0 * period / total->period) : 0;
 	bool current = ui_browser__is_current_entry(uib, row);
 	int nr_samples = 0;

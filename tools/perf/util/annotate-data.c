@@ -1814,14 +1814,17 @@ void annotated_data_type__tree_delete(struct rb_root *root)
  * @offset: Offset in the type
  * @nr_samples: Number of samples at this offset
  * @period: Event count at this offset
+ * @is_store: Whether the access at this offset is a store
  *
  * This function updates type histogram at @ofs for @evsel.  Samples are
  * aggregated before calling this function so it can be called with more
- * than one samples at a certain offset.
+ * than one samples at a certain offset.  Loads and stores are counted
+ * separately so an offset that is both read and written keeps both
+ * directions (the last writer must not win).
  */
 int annotated_data_type__update_samples(struct annotated_data_type *adt,
 					struct evsel *evsel, int offset,
-					int nr_samples, u64 period)
+					int nr_samples, u64 period, bool is_store)
 {
 	struct type_hist *h;
 
@@ -1841,9 +1844,14 @@ int annotated_data_type__update_samples(struct annotated_data_type *adt,
 	h = adt->histograms[evsel->core.idx];
 
 	h->nr_samples += nr_samples;
-	h->addr[offset].nr_samples += nr_samples;
 	h->period += period;
-	h->addr[offset].period += period;
+	if (is_store) {
+		h->addr[offset].nr_samples_store += nr_samples;
+		h->addr[offset].period_store += period;
+	} else {
+		h->addr[offset].nr_samples_load += nr_samples;
+		h->addr[offset].period_load += period;
+	}
 	return 0;
 }
 
@@ -1927,8 +1935,10 @@ static void print_annotated_data_type(struct annotated_data_type *mem_type,
 		samples = 0;
 		period = 0;
 		for (i = 0; i < member->size; i++) {
-			samples += h->addr[member->offset + i].nr_samples;
-			period += h->addr[member->offset + i].period;
+			samples += h->addr[member->offset + i].nr_samples_load +
+				   h->addr[member->offset + i].nr_samples_store;
+			period += h->addr[member->offset + i].period_load +
+				  h->addr[member->offset + i].period_store;
 		}
 		print_annotated_data_value(h, period, samples);
 		nr_events++;

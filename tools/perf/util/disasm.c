@@ -32,6 +32,7 @@
 #include "maps.h"
 #include "namespaces.h"
 #include "srcline.h"
+#include "string2.h" /* strstarts */
 #include "symbol.h"
 #include "thread.h"
 #include "util.h"
@@ -735,6 +736,37 @@ bool ins__is_ret(const struct ins *ins)
 bool ins__is_lock(const struct ins *ins)
 {
 	return ins->ops == &lock_ops;
+}
+
+/*
+ * Some instructions read the memory operand even when it is in the
+ * target slot (the second operand in AT&T syntax): cmp, test, bt and
+ * cmov only read it, while mov, add, ... write it and bts/btr/btc,
+ * xchg and cmpxchg modify it.  The ones that only read it must not be
+ * classified as stores when data-type histograms split loads from
+ * stores by operand position.  Note that the instruction name is not
+ * normalized: cmpxchg (including cmpxchg8b and cmpxchg16b) also starts
+ * with "cmp", and bt is followed by an optional size suffix (b, w, l,
+ * q) while bts/btr/btc are different instructions that write memory.
+ *
+ * The mnemonics checked here are x86 (AT&T syntax) names; on other
+ * architectures they fall through to the operand position rule to
+ * decide the direction, as they did before the load/store split.
+ */
+bool ins__reads_mem_target(const struct ins *ins)
+{
+	const char *name = ins->name;
+
+	if (strstarts(name, "cmp"))
+		return !strstarts(name, "cmpxchg");
+
+	if (strstarts(name, "bt")) {
+		const char *sfx = name + 2;
+
+		return !*sfx || strchr("bwlq", *sfx);
+	}
+
+	return strstarts(name, "test") || strstarts(name, "cmov");
 }
 
 static int ins__key_cmp(const void *name, const void *insp)

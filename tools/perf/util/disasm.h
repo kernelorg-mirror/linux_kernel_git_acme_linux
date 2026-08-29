@@ -141,6 +141,7 @@ bool ins__is_jump(const struct ins *ins);
 bool ins__is_fused(const struct arch *arch, const char *ins1, const char *ins2);
 bool ins__is_ret(const struct ins *ins);
 bool ins__is_lock(const struct ins *ins);
+bool ins__reads_mem_target(const struct ins *ins);
 
 const struct ins_ops *check_ppc_insn(struct disasm_line *dl);
 
