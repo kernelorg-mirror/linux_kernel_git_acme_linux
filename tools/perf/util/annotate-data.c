@@ -7,7 +7,11 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 #include <inttypes.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <linux/zalloc.h>
 
 #include "annotate.h"
@@ -15,6 +19,10 @@
 #include "debuginfo.h"
 #include "debug.h"
 #include "dso.h"
+#include "session.h"
+#include "machine.h"
+#include "cacheline.h"
+#include "header.h"
 #include "dwarf-regs.h"
 #include "evsel.h"
 #include "evlist.h"
@@ -1995,4 +2003,620 @@ int hist_entry__annotate_data_tty(struct hist_entry *he, struct evsel *evsel)
 
 	/* move to the next entry */
 	return '>';
+}
+
+/*
+ * Escape a string for JSON output, writing to fp.
+ * Handles: ", \, and control characters.
+ */
+/*
+ * Escape a string for inclusion in the JSON output.  The strings come from
+ * DWARF/BTF (type and member names, some producers emit garbage for them,
+ * e.g. uninitialized bytes in DW_AT_name) and from DSO paths and event
+ * names, so apart from the usual JSON escapes the output must also remain
+ * valid UTF-8: well-formed multi-byte sequences pass through untouched,
+ * anything else, be it a stray continuation byte or a mangled sequence, is
+ * replaced with U+FFFD, the Unicode replacement character, instead of
+ * emitting raw bytes that strict JSON consumers reject.
+ */
+static void json_escape(FILE *fp, const char *str)
+{
+	if (!str)
+		return;
+
+	for (const unsigned char *p = (const unsigned char *)str; *p; ) {
+		unsigned char c = *p;
+		size_t len, i;
+		bool valid = true;
+
+		switch (c) {
+		case '"':
+			fputs("\\\"", fp);
+			p++;
+			continue;
+		case '\\':
+			fputs("\\\\", fp);
+			p++;
+			continue;
+		case '\b':
+			fputs("\\b", fp);
+			p++;
+			continue;
+		case '\f':
+			fputs("\\f", fp);
+			p++;
+			continue;
+		case '\n':
+			fputs("\\n", fp);
+			p++;
+			continue;
+		case '\r':
+			fputs("\\r", fp);
+			p++;
+			continue;
+		case '\t':
+			fputs("\\t", fp);
+			p++;
+			continue;
+		default:
+			break;
+		}
+
+		if (c < 0x20) {
+			fprintf(fp, "\\u%04x", c);
+			p++;
+			continue;
+		}
+
+		if (c < 0x80) {
+			fputc(c, fp);
+			p++;
+			continue;
+		}
+
+		/*
+		 * A multi-byte sequence: 2 bytes for C2-DF, 3 for E0-EF and
+		 * 4 for F0-F4, the remaining lead bytes (C0, C1, F5-FF) can
+		 * only start overlong, surrogate or out-of-range encodings.
+		 */
+		if (c >= 0xc2 && c <= 0xdf)
+			len = 2;
+		else if (c >= 0xe0 && c <= 0xef)
+			len = 3;
+		else if (c >= 0xf0 && c <= 0xf4)
+			len = 4;
+		else
+			valid = false;
+
+		for (i = 1; valid && i < len; i++)
+			if ((p[i] & 0xc0) != 0x80)
+				valid = false;
+
+		/* Reject overlong encodings, surrogates and values past U+10FFFF. */
+		if (valid) {
+			unsigned char c1 = p[1];
+
+			if ((c == 0xe0 && c1 < 0xa0) ||
+			    (c == 0xed && c1 >= 0xa0) ||
+			    (c == 0xf0 && c1 < 0x90) ||
+			    (c == 0xf4 && c1 >= 0x90))
+				valid = false;
+		}
+
+		if (valid) {
+			fwrite(p, 1, len, fp);
+			p += len;
+		} else {
+			fputs("\\ufffd", fp);
+			p++;
+		}
+	}
+}
+
+/* Spaces per nesting level, just to make the output readable. */
+#define JSON_INDENT 4
+
+static void json_indent(FILE *fp, int level)
+{
+	fprintf(fp, "%*s", level * JSON_INDENT, "");
+}
+
+/*
+ * The "key": value pairs of an object, with the key at the given nesting
+ * level and the comma that separates it from the previous one; *first
+ * tracks whether this is the object's first field.
+ */
+static void json_str_field(FILE *fp, const char *key, const char *val,
+			   int level, bool *first)
+{
+	fputs(*first ? "\n" : ",\n", fp);
+	*first = false;
+	json_indent(fp, level);
+	fprintf(fp, "\"%s\": ", key);
+
+	if (val) {
+		fputc('"', fp);
+		json_escape(fp, val);
+		fputc('"', fp);
+	} else {
+		fputs("null", fp);
+	}
+}
+
+static void json_int_field(FILE *fp, const char *key, int val, int level,
+			   bool *first)
+{
+	fputs(*first ? "\n" : ",\n", fp);
+	*first = false;
+	json_indent(fp, level);
+	fprintf(fp, "\"%s\": %d", key, val);
+}
+
+static void json_u64_field(FILE *fp, const char *key, u64 val, int level,
+			   bool *first)
+{
+	fputs(*first ? "\n" : ",\n", fp);
+	*first = false;
+	json_indent(fp, level);
+	fprintf(fp, "\"%s\": %" PRIu64, key, val);
+}
+
+/*
+ * JSON export of the data-type access profile, to be consumed by tools
+ * like pahole.  For each (dso, data type) it emits the member tree and
+ * the per-event, per-offset access histograms so the consumer can
+ * highlight hot/co-accessed fields and suggest cacheline groups.
+ *
+ * This is a stable ABI, versioned by the top level "version" field so
+ * that a consumer can tell what it is parsing; pahole parses it, so
+ * think twice before changing field names or types; the indentation
+ * (4 spaces per nesting level, arrays closing on the line of their last
+ * element) is only to help humans inspect the output and is not part of
+ * the ABI.
+ *
+ * The document is a single object with three entries: the schema
+ * version, the machine the profile was captured on - the same
+ * information 'perf report --header-only' prints for the perf.data
+ * file, plus the cacheline size the histograms were collected with -
+ * and then one entry per DSO (binary) with the types that had hits in
+ * it:
+ *
+ * {
+ *     "version": 1,
+ *     "machine": {
+ *         "hostname": "<as in 'perf report --header-only'>",
+ *         "os_release": "<kernel release>",
+ *         "perf_version": "<perf version>",
+ *         "arch": "<uname.machine>",
+ *         "nrcpus_online": <int>,
+ *         "nrcpus_avail": <int>,
+ *         "cpudesc": "<model name>",
+ *         "cpuid": "<cpuid>",
+ *         "total_memory_kb": <u64>,
+ *         "cmdline": [ "<perf argv0>", "<perf argv1>", ... ],
+ *         "captured_on": "<the mtime of the perf.data file, as seen on the machine doing the analysis>",
+ *         "cacheline_size": <bytes>
+ *     },
+ *     "dsos": [
+ *         { "dso": "<dso long name>",
+ *           "build_id": "<build ID hex, or null>",
+ *           "types": [
+ *               { "type": "<type name>",
+ *                 "size": <bytes>,
+ *                 "members": [                  # member tree, recursive
+ *                     { "type": "<type name>", "name": "<member var name or "">",
+ *                       "offset": <int, absolute within the outermost type>,
+ *                       "size": <bytes>, "truncated": <bool, omitted when false>,
+ *                       "children": [                      # leaves omit it
+ *                           <nested members, same shape> ]
+ *                     },
+ *                     ...
+ *                 ],
+ *                 "histograms": [               # one entry per event with samples
+ *                     { "event": "<event name>",
+ *                       "total_samples": <u64>,
+ *                       "total_period": <u64>,
+ *                       "samples": [ { "offset": <int>, "nr_samples_load": <int>,
+ *                                      "nr_samples_store": <int>,
+ *                                      "period_load": <u64>,
+ *                                      "period_store": <u64> }, ... ]
+ *                     },
+ *                     ...
+ *                 ]
+ *               },
+ *               ...
+ *           ]
+ *         },
+ *         ...
+ *     ]
+ * }
+ *
+ *   The DSO centric grouping is what a consumer such as pahole needs:
+ *   pahole works on one DSO per session, so it takes the profile, looks
+ *   up the entry for the build ID of the binary it is analyzing and gets
+ *   exactly the types of that binary that were hit, together with the
+ *   machine the profile came from.  Same-named types resolved in
+ *   different DSOs are separate objects, in separate DSO entries, and
+ *   "size" is in bytes so that a consumer can detect a mismatch even
+ *   when the build ID is not available.
+ *
+ *   "dso" is the DSO long name (the vmlinux or .ko path when known,
+ *   the binary path, "[kernel.kallsyms]_text" for a kallsyms-only
+ *   kernel), except that a DSO opened through the ~/.debug build-id
+ *   cache, which is the default, is named by its path in that cache,
+ *   e.g. "/home/acme/.debug/.build-id/de/e74c...aaa4/elf" rather than
+ *   by the vmlinux path: in a system-wide perf mem record profile 693
+ *   of the 694 objects came out that way, with only the synthesized
+ *   vdso carrying a real path.  "children" is present only for members
+ *   that have children: a leaf member carries just "type", "name",
+ *   "offset" and "size", with no "children" key at all, and those are
+ *   the majority (5200 of 6788 members in that same profile).  A member
+ *   whose children were cut off at the member nesting bound, see
+ *   MAX_MEMBER_DEPTH in annotate-data.c, carries "truncated": true, so
+ *   that a consumer can tell such a member from one whose tree really
+ *   ends there.
+ *
+ *   "build_id" is its 40-hex-char build ID, null when the
+ *   DSO has none (--no-buildid, anonymous DSOs).  The build ID, not
+ *   the path, is the portable identity: paths differ across machines,
+ *   while a build ID lets a consumer fetch the exact matching binary
+ *   or debuginfo from the ~/.debug build-id cache or debuginfod and
+ *   positively verify it is analyzing the same binary that was
+ *   profiled, instead of only guessing from "size" that it is.  A
+ *   null build ID means "unverified": fall back to name+size matching.
+ *
+ *   The (DSO, build ID) identity is also what makes a type centric view
+ *   possible for the data structures that are part of an ABI, which is
+ *   not implemented yet, neither in perf nor in its consumers: the same
+ *   library build (the same build ID) profiled in different workloads
+ *   can be compared, and the structures shared across an ABI boundary -
+ *   a libc struct, the vDSO, the structures an out of tree kernel module
+ *   or a BPF program shares with the kernel - can be tracked as they
+ *   change from release to release.  This is about the identity a
+ *   consumer needs for that, not about the view itself.
+ *
+ *   Note that "dsos" gathers the DSOs of the host machine and of the
+ *   guest machines of a perf.data file recorded with --guest*, while
+ *   "machine" describes the machine the profile was captured on.
+ *
+ *   The histogram is keyed by (type, member offset), and the same offset
+ *   is touched by both loads and stores at different call sites, so the
+ *   load/store direction is NOT a property of the offset.  Each access is
+ *   therefore counted in separate per-direction counters
+ *   (nr_samples_load / nr_samples_store, period_load / period_store) taken
+ *   from the semantic role the architecture's operand parser assigns to
+ *   the memory operand: a store has it as its TARGET, a load as its
+ *   SOURCE.  Keeping the two directions separate means pahole can report
+ *   per-member reads vs writes (nr_reads / nr_writes) without the last
+ *   writer at an offset erasing the other direction - which is the common
+ *   case for shared kernel structs (e.g. struct sock fields read in one
+ *   path, written in another).  On x86, the parser follows the AT&T text
+ *   convention, so instructions that only read the memory operand even
+ *   when it is in the target slot (cmp, test, bt - e.g.
+ *   "cmpw $2, 0x226(%rdx)" tests sk->sk_type) are corrected to loads at
+ *   profile time; that is an x86 parser detail, not part of the format.
+ *
+ *   Note on atomics / RMW: an instruction such as "lock incl (%rax)" has
+ *   the memory operand as its TARGET and is counted purely as a store.
+ *   For cache-invalidation / false-sharing analysis that is the intended
+ *   semantics - a read-modify-write takes the cacheline exclusive - but it
+ *   is a deliberate judgment call baked into the direction, not a measured
+ *   load+store split; keep it in mind when reading hot-store fields.
+ */
+
+static void member_to_json(FILE *fp, struct annotated_member *member, int level);
+
+static void members_to_json(FILE *fp, struct list_head *head, int level)
+{
+	struct annotated_member *child;
+	int n = 0;
+
+	list_for_each_entry(child, head, node) {
+		if (n++)
+			fputc(',', fp);
+		member_to_json(fp, child, level);
+	}
+}
+
+static void member_to_json(FILE *fp, struct annotated_member *member, int level)
+{
+	fputc('\n', fp);
+	json_indent(fp, level);
+	fputs("{ \"type\": \"", fp);
+	json_escape(fp, member->type_name ?: "");
+	fputs("\", \"name\": \"", fp);
+	json_escape(fp, member->var_name ?: "");
+	fprintf(fp, "\", \"offset\": %d, \"size\": %d",
+		member->offset, member->size);
+
+	if (member->truncated)
+		fputs(", \"truncated\": true", fp);
+
+	if (!list_empty(&member->children)) {
+		fputs(", \"children\": [", fp);
+		members_to_json(fp, &member->children, level + 1);
+		fputs(" ]\n", fp);
+		json_indent(fp, level);
+		fputc('}', fp);
+	} else {
+		fputs(" }", fp);
+	}
+}
+
+struct adt_json_priv {
+	FILE *fp;
+	struct evlist *evlist;
+	bool first_dso;
+};
+
+/* Whether this data type got any sample in any of its histograms. */
+static bool adt_has_hits(struct annotated_data_type *adt)
+{
+	int i;
+
+	if (adt->nr_histograms == 0 || adt->histograms == NULL)
+		return false;
+
+	for (i = 0; i < adt->nr_histograms; i++) {
+		if (adt->histograms[i] && adt->histograms[i]->nr_samples)
+			return true;
+	}
+	return false;
+}
+
+static void adt_to_json(FILE *fp, struct annotated_data_type *adt,
+			struct evlist *evlist, bool first, int level)
+{
+	struct evsel *evsel;
+	struct type_hist *h;
+	int off, n;
+	bool he = false;
+
+	if (!first)
+		fputc(',', fp);
+	fputc('\n', fp);
+	json_indent(fp, level);
+	fputs("{ \"type\": \"", fp);
+	json_escape(fp, adt->self.type_name ?: "");
+	fputs("\",\n", fp);
+	json_indent(fp, level + 1);
+	fprintf(fp, "\"size\": %d,\n", adt->self.size);
+	json_indent(fp, level + 1);
+	fputs("\"members\": [", fp);
+	members_to_json(fp, &adt->self.children, level + 2);
+	fputs(" ],\n", fp);
+	json_indent(fp, level + 1);
+	fputs("\"histograms\": [", fp);
+
+	evlist__for_each_entry(evlist, evsel) {
+		if (evsel->core.idx >= adt->nr_histograms)
+			continue;
+		h = adt->histograms[evsel->core.idx];
+		if (h == NULL || h->nr_samples == 0)
+			continue;
+		if (he)
+			fputc(',', fp);
+		he = true;
+		fputc('\n', fp);
+		json_indent(fp, level + 2);
+		fputs("{ \"event\": \"", fp);
+		json_escape(fp, evsel->name ?: "");
+		fputs("\",\n", fp);
+		json_indent(fp, level + 3);
+		fprintf(fp, "\"total_samples\": %" PRIu64 ",\n", h->nr_samples);
+		json_indent(fp, level + 3);
+		fprintf(fp, "\"total_period\": %" PRIu64 ",\n", h->period);
+		json_indent(fp, level + 3);
+		fputs("\"samples\": [", fp);
+		n = 0;
+		for (off = 0; off < adt->self.size; off++) {
+			struct type_hist_entry *e = &h->addr[off];
+
+			if (e->nr_samples_load + e->nr_samples_store == 0 &&
+			    e->period_load + e->period_store == 0)
+				continue;
+			if (n++)
+				fputc(',', fp);
+			fputs(" { \"offset\": ", fp);
+			fprintf(fp, "%d", off);
+			fprintf(fp, ", \"nr_samples_load\": %d, "
+				"\"nr_samples_store\": %d, \"period_load\": %"
+				PRIu64 ", \"period_store\": %" PRIu64 " }",
+				e->nr_samples_load, e->nr_samples_store,
+				e->period_load, e->period_store);
+		}
+		fputs(" ] }", fp);
+	}
+	fputs("\n", fp);
+	json_indent(fp, level + 1);
+	fputs("]\n", fp);
+	json_indent(fp, level);
+	fputc('}', fp);
+}
+
+static void dso_to_json(FILE *fp, struct dso *dso, struct adt_json_priv *p,
+			int level)
+{
+	struct rb_root *root = dso__data_types(dso);
+	struct annotated_data_type *adt;
+	struct rb_node *node;
+	bool first = true;
+
+	if (!p->first_dso)
+		fputc(',', fp);
+	fputc('\n', fp);
+	json_indent(fp, level);
+	fputs("{ \"dso\": \"", fp);
+	json_escape(fp, dso__long_name(dso));
+	fputs("\",\n", fp);
+	json_indent(fp, level + 1);
+	fputs("\"build_id\": ", fp);
+	if (dso__has_build_id(dso)) {
+		char sbuild_id[SBUILD_ID_SIZE];
+
+		build_id__snprintf(dso__bid(dso), sbuild_id, sizeof(sbuild_id));
+		fprintf(fp, "\"%s\"", sbuild_id);
+	} else {
+		fputs("null", fp);
+	}
+	fputs(",\n", fp);
+	json_indent(fp, level + 1);
+	fputs("\"types\": [", fp);
+
+	for (node = rb_first(root); node; node = rb_next(node)) {
+		adt = rb_entry(node, struct annotated_data_type, node);
+
+		if (!adt_has_hits(adt))
+			continue;
+		adt_to_json(fp, adt, p->evlist, first, level + 2);
+		first = false;
+	}
+	fputs("\n", fp);
+	json_indent(fp, level + 1);
+	fputs("]\n", fp);
+	json_indent(fp, level);
+	fputc('}', fp);
+	p->first_dso = false;
+}
+
+/*
+ * The machine the profile was captured on: the same information 'perf
+ * report --header-only' prints for the perf.data file, plus the
+ * cacheline size the histograms were collected with.  A consumer such as
+ * pahole uses it to tell where the profile came from (a struct layout
+ * that is hot on one machine may not be on another) and to group the
+ * offsets into cachelines the way perf did.
+ */
+static void machine_to_json(FILE *fp, struct perf_session *session,
+			    unsigned int cln_size)
+{
+	struct perf_env *env = &session->header.env;
+	char captured_on[32] = "";
+	struct stat st;
+	bool first = true;
+	int i;
+
+	if (fstat(perf_data__fd(session->data), &st) == 0) {
+		struct tm tm;
+
+		if (localtime_r(&st.st_mtime, &tm))
+			strftime(captured_on, sizeof(captured_on),
+				 "%a %b %e %H:%M:%S %Y", &tm);
+	}
+
+	fputs("{\n", fp);
+	json_indent(fp, 1);
+	fputs("\"version\": 1,\n", fp);
+	json_indent(fp, 1);
+	fputs("\"machine\": {", fp);
+	/* The fields come with the newline and the comma that precedes them. */
+	json_str_field(fp, "hostname", env->hostname, 2, &first);
+	json_str_field(fp, "os_release", env->os_release, 2, &first);
+	json_str_field(fp, "perf_version", env->version, 2, &first);
+	json_str_field(fp, "arch", env->arch, 2, &first);
+	json_int_field(fp, "nrcpus_online", env->nr_cpus_online, 2, &first);
+	json_int_field(fp, "nrcpus_avail", env->nr_cpus_avail, 2, &first);
+	json_str_field(fp, "cpudesc", env->cpu_desc, 2, &first);
+	json_str_field(fp, "cpuid", env->cpuid, 2, &first);
+	json_u64_field(fp, "total_memory_kb", env->total_mem, 2, &first);
+
+	fputs(",\n", fp);
+	json_indent(fp, 2);
+	fputs("\"cmdline\": [", fp);
+	for (i = 0; i < env->nr_cmdline; i++) {
+		fprintf(fp, "%s \"", i ? "," : "");
+		json_escape(fp, env->cmdline_argv[i] ?: "");
+		fputc('"', fp);
+	}
+	fputs(" ]", fp);
+	first = false;
+
+	json_str_field(fp, "captured_on", captured_on[0] ? captured_on : NULL,
+		       2, &first);
+	json_u64_field(fp, "cacheline_size", cln_size, 2, &first);
+	fputs("\n", fp);
+	json_indent(fp, 1);
+	fputs("},\n", fp);
+	json_indent(fp, 1);
+	fputs("\"dsos\": [", fp);
+}
+
+static int adt_json_dso_cb(struct dso *dso, struct machine *machine __maybe_unused,
+			   void *priv)
+{
+	struct adt_json_priv *p = priv;
+	struct rb_root *root = dso__data_types(dso);
+	struct annotated_data_type *adt;
+	struct rb_node *node;
+
+	if (RB_EMPTY_ROOT(root))
+		return 0;
+
+	/* Skip the DSOs without a single type that had hits. */
+	for (node = rb_first(root); node; node = rb_next(node)) {
+		adt = rb_entry(node, struct annotated_data_type, node);
+		if (adt_has_hits(adt))
+			break;
+	}
+	if (node == NULL)
+		return 0;
+
+	dso_to_json(p->fp, dso, p, 2);
+	return 0;
+}
+
+int perf_session__annotate_data_to_json(struct perf_session *session, const char *filename)
+{
+	struct adt_json_priv priv;
+	struct rb_node *nd;
+	FILE *fp = stdout;
+	unsigned int cln_size;
+	int ret;
+
+	if (filename && strcmp(filename, "-") != 0) {
+		fp = fopen(filename, "w");
+		if (fp == NULL) {
+			pr_err("Cannot open %s for JSON output\n", filename);
+			return -1;
+		}
+	}
+
+	cln_size = session->header.env.cln_size;
+	if (!cln_size)
+		cln_size = cacheline_size();
+	if (!cln_size)
+		cln_size = DEFAULT_CACHELINE_SIZE;
+
+	priv.fp = fp;
+	priv.evlist = session->evlist;
+	priv.first_dso = true;
+
+	machine_to_json(fp, session, cln_size);
+	ret = machine__for_each_dso(&session->machines.host, adt_json_dso_cb, &priv);
+	if (ret)
+		goto out;
+
+	/*
+	 * Also cover guest machines; data types can live in a guest
+	 * kernel/userspace DSO too.
+	 */
+	for (nd = rb_first_cached(&session->machines.guests); nd; nd = rb_next(nd)) {
+		struct machine *pos = rb_entry(nd, struct machine, rb_node);
+
+		ret = machine__for_each_dso(pos, adt_json_dso_cb, &priv);
+		if (ret)
+			goto out;
+	}
+
+	fputs("\n", fp);
+	json_indent(fp, 1);
+	fputs("]\n}\n", fp);
+
+out:
+	if (fp != stdout) {
+		fclose(fp);
+		if (ret)
+			unlink(filename);
+	}
+	return ret;
 }
