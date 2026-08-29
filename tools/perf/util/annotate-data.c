@@ -7,6 +7,8 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 #include <inttypes.h>
 #include <linux/zalloc.h>
 
@@ -15,6 +17,11 @@
 #include "debuginfo.h"
 #include "debug.h"
 #include "dso.h"
+#include "session.h"
+#include "machine.h"
+#include "cacheline.h"
+#include "header.h"
+#include "strbuf.h"
 #include "dwarf-regs.h"
 #include "evsel.h"
 #include "evlist.h"
@@ -1967,4 +1974,286 @@ int hist_entry__annotate_data_tty(struct hist_entry *he, struct evsel *evsel)
 
 	/* move to the next entry */
 	return '>';
+}
+
+/*
+ * Escape a string for JSON output, writing to fp.
+ * Handles: ", \, and control characters.
+ */
+static void json_escape(FILE *fp, const char *str)
+{
+	if (!str)
+		return;
+
+	for (const char *p = str; *p; p++) {
+		switch (*p) {
+		case '"':
+			fputs("\\\"", fp);
+			break;
+		case '\\':
+			fputs("\\\\", fp);
+			break;
+		case '\b':
+			fputs("\\b", fp);
+			break;
+		case '\f':
+			fputs("\\f", fp);
+			break;
+		case '\n':
+			fputs("\\n", fp);
+			break;
+		case '\r':
+			fputs("\\r", fp);
+			break;
+		case '\t':
+			fputs("\\t", fp);
+			break;
+		default:
+			if ((unsigned char)*p < 0x20) {
+				fprintf(fp, "\\u%04x", (unsigned char)*p);
+			} else {
+				fputc(*p, fp);
+			}
+			break;
+		}
+	}
+}
+
+/*
+ * JSON export of the data-type access profile, to be consumed by tools
+ * like pahole.  For each (dso, data type) it emits the member tree and
+ * the per-event, per-offset access histograms so the consumer can
+ * highlight hot/co-accessed fields and suggest cacheline groups.
+ *
+ * This is a stable ABI: pahole parses it, so think twice before changing
+ * field names or types.  The output is a JSON array of objects, one per
+ * data type:
+ *
+ * [
+ *   {
+ *     "type":          "<type name>",
+ *     "size":          <int, bytes - use to detect a vmlinux mismatch>,
+ *     "cacheline_size":<int, bytes>,
+ *     "members": [                       # member tree, recursive
+ *       {
+ *         "type":  "<member type name>",
+ *         "name":  "<member var name or "">",
+ *         "offset": <int, absolute within the outermost type>,
+ *         "size":   <int, bytes>,
+ *         "children": [ <nested members, same shape> ]
+ *       }, ...
+ *     ],
+ *     "histograms": [                    # one entry per event with samples
+ *       {
+ *         "event":       "<event name>",
+ *         "total_samples": <u64>,
+ *         "total_period":   <u64>,
+ *         "samples": [
+ *           { "offset": <int>,
+ *             "nr_samples_load":  <int>, "nr_samples_store": <int>,
+ *             "period_load":  <u64>, "period_store": <u64> }, ...
+ *         ]
+ *       }, ...
+ *     ]
+ *   }, ...
+ * ]
+ *
+ *   The histogram is keyed by (type, member offset), and the same offset
+ *   is touched by both loads and stores at different call sites, so the
+ *   load/store direction is NOT a property of the offset.  Each access is
+ *   therefore counted in separate per-direction counters
+ *   (nr_samples_load / nr_samples_store, period_load / period_store) taken
+ *   from the memory operand of the sampled instruction: a store has the
+ *   memory operand as its TARGET, a load as its SOURCE.  Keeping the two
+ *   directions separate means pahole can report per-member reads vs writes
+ *   (nr_reads / nr_writes) without the last writer at an offset erasing
+ *   the other direction - which is the common case for shared kernel
+ *   structs (e.g. struct sock fields read in one path, written in another).
+ *   Instructions that only read the memory operand even when it is in the
+ *   target slot (cmp, test, bt, cmov - e.g. "cmpw $2, 0x226(%rdx)" tests
+ *   sk->sk_type) count as loads.
+ *
+ *   Note on atomics / RMW: an instruction such as "lock incl (%rax)" has
+ *   the memory operand as its TARGET and is counted purely as a store.
+ *   For cache-invalidation / false-sharing analysis that is the intended
+ *   semantics - a read-modify-write takes the cacheline exclusive - but it
+ *   is a deliberate judgment call baked into the direction, not a measured
+ *   load+store split; keep it in mind when reading hot-store fields.
+ */
+
+static void member_to_json(FILE *fp, struct annotated_member *member, int level);
+
+static void members_to_json(FILE *fp, struct list_head *head, int level)
+{
+	struct annotated_member *child;
+	int n = 0;
+
+	list_for_each_entry(child, head, node) {
+		if (n++)
+			fputc(',', fp);
+		member_to_json(fp, child, level);
+	}
+}
+
+static void member_to_json(FILE *fp, struct annotated_member *member, int level)
+{
+	fprintf(fp, "\n%*s{ \"type\": \"", level * 2, "");
+	json_escape(fp, member->type_name ?: "");
+	fprintf(fp, "\", \"name\": \"");
+	json_escape(fp, member->var_name ?: "");
+	fprintf(fp, "\", \"offset\": %d, \"size\": %d",
+		member->offset, member->size);
+
+	if (!list_empty(&member->children)) {
+		fprintf(fp, ", \"children\": [");
+		members_to_json(fp, &member->children, level + 1);
+		fprintf(fp, " ]");
+	}
+	fprintf(fp, " }");
+}
+
+static int adt_to_json(FILE *fp, struct annotated_data_type *adt,
+			struct evlist *evlist, unsigned int cln_size)
+{
+	struct evsel *evsel;
+	struct type_hist *h;
+	int off, n;
+	bool he = false;
+
+	fprintf(fp, "{ \"type\": \"");
+	json_escape(fp, adt->self.type_name ?: "");
+	fprintf(fp, "\", \"size\": %d, \"cacheline_size\": %u, \"members\": [",
+		adt->self.size, cln_size);
+	members_to_json(fp, &adt->self.children, 1);
+	fprintf(fp, " ], \"histograms\": [");
+
+	evlist__for_each_entry(evlist, evsel) {
+		if (evsel->core.idx >= adt->nr_histograms)
+			continue;
+		h = adt->histograms[evsel->core.idx];
+		if (h == NULL || h->nr_samples == 0)
+			continue;
+		if (he)
+			fputc(',', fp);
+		he = true;
+		fprintf(fp, "\n  { \"event\": \"");
+		json_escape(fp, evsel->name ?: "");
+		fprintf(fp, "\", \"total_samples\": %" PRIu64
+			", \"total_period\": %" PRIu64 ", \"samples\": [",
+			h->nr_samples, h->period);
+		n = 0;
+		for (off = 0; off < adt->self.size; off++) {
+			struct type_hist_entry *e = &h->addr[off];
+
+			if (e->nr_samples_load + e->nr_samples_store == 0 &&
+			    e->period_load + e->period_store == 0)
+				continue;
+			if (n++)
+				fputc(',', fp);
+			fprintf(fp, "{ \"offset\": %d, \"nr_samples_load\": %d, "
+				"\"nr_samples_store\": %d, \"period_load\": %"
+				PRIu64 ", \"period_store\": %" PRIu64 " }",
+				off, e->nr_samples_load, e->nr_samples_store,
+				e->period_load, e->period_store);
+		}
+		fprintf(fp, " ] }");
+	}
+	fprintf(fp, " ] }");
+	return 0;
+}
+
+struct adt_json_priv {
+	FILE *fp;
+	struct evlist *evlist;
+	unsigned int cln_size;
+	bool first;
+};
+
+static int adt_json_dso_cb(struct dso *dso, struct machine *machine __maybe_unused,
+			   void *priv)
+{
+	struct adt_json_priv *p = priv;
+	struct rb_root *root = dso__data_types(dso);
+	struct annotated_data_type *adt;
+	struct rb_node *node;
+	int i;
+	bool any;
+	int err;
+
+	if (RB_EMPTY_ROOT(root))
+		return 0;
+
+	for (node = rb_first(root); node; node = rb_next(node)) {
+		adt = rb_entry(node, struct annotated_data_type, node);
+		if (adt->nr_histograms == 0 || adt->histograms == NULL)
+			continue;
+		any = false;
+		for (i = 0; i < adt->nr_histograms; i++) {
+			if (adt->histograms[i] && adt->histograms[i]->nr_samples) {
+				any = true;
+				break;
+			}
+		}
+		if (!any)
+			continue;
+		if (!p->first)
+			fputc(',', p->fp);
+		p->first = false;
+		err = adt_to_json(p->fp, adt, p->evlist, p->cln_size);
+		if (err)
+			return err;
+	}
+	return 0;
+}
+
+int perf_session__annotate_data_to_json(struct perf_session *session, const char *filename)
+{
+	struct adt_json_priv priv;
+	struct rb_node *nd;
+	FILE *fp = stdout;
+	int ret;
+
+	if (filename && strcmp(filename, "-") != 0) {
+		fp = fopen(filename, "w");
+		if (fp == NULL) {
+			pr_err("Cannot open %s for JSON output\n", filename);
+			return -1;
+		}
+	}
+
+	priv.fp = fp;
+	priv.evlist = session->evlist;
+	priv.cln_size = session->header.env.cln_size;
+	if (!priv.cln_size)
+		priv.cln_size = cacheline_size();
+	if (!priv.cln_size)
+		priv.cln_size = DEFAULT_CACHELINE_SIZE;
+	priv.first = true;
+
+	fprintf(fp, "[");
+	ret = machine__for_each_dso(&session->machines.host, adt_json_dso_cb, &priv);
+	if (ret)
+		goto out;
+
+	/*
+	 * Also cover guest machines; data types can live in a guest
+	 * kernel/userspace DSO too.
+	 */
+	for (nd = rb_first_cached(&session->machines.guests); nd; nd = rb_next(nd)) {
+		struct machine *pos = rb_entry(nd, struct machine, rb_node);
+
+		ret = machine__for_each_dso(pos, adt_json_dso_cb, &priv);
+		if (ret)
+			goto out;
+	}
+
+	fprintf(fp, "]\n");
+
+out:
+	if (fp != stdout) {
+		fclose(fp);
+		if (ret)
+			unlink(filename);
+	}
+	return ret;
 }

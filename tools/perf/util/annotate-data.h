@@ -19,6 +19,7 @@ struct evsel;
 struct hist_browser_timer;
 struct hist_entry;
 struct map_symbol;
+struct perf_session;
 struct thread;
 
 #define pr_debug_dtp(fmt, ...)					\
@@ -259,6 +260,10 @@ void global_var_type__tree_delete(struct rb_root *root);
 /* Print data type annotation (including members) on stdout */
 int hist_entry__annotate_data_tty(struct hist_entry *he, struct evsel *evsel);
 
+/* Export data-type access histograms as JSON for consumption by pahole */
+int perf_session__annotate_data_to_json(struct perf_session *session,
+					const char *filename);
+
 /* Get name of member field at the given offset in the data type */
 int annotated_data_type__get_member_name(struct annotated_data_type *adt,
 					 char *buf, size_t sz, int member_offset);
@@ -308,6 +313,12 @@ static inline void global_var_type__tree_delete(struct rb_root *root __maybe_unu
 
 static inline int hist_entry__annotate_data_tty(struct hist_entry *he __maybe_unused,
 						struct evsel *evsel __maybe_unused)
+{
+	return -1;
+}
+
+static inline int perf_session__annotate_data_to_json(struct perf_session *session __maybe_unused,
+						      const char *filename __maybe_unused)
 {
 	return -1;
 }
