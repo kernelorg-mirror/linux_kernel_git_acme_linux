@@ -64,12 +64,28 @@ struct annotated_member {
 
 /**
  * struct type_hist_entry - Histogram entry per offset
- * @nr_samples: Number of samples
- * @period: Count of event
+ * @nr_samples_load:  Number of load samples at this offset
+ * @nr_samples_store: Number of store samples at this offset
+ * @period_load:  Event count of loads at this offset
+ * @period_store: Event count of stores at this offset
+ *
+ * The histogram is keyed by (type, member offset), and the same offset is
+ * touched by loads and stores in different call sites (e.g. a field read
+ * in one function and written in another), so the load/store direction is
+ * NOT a property of the offset.  Keep separate counters per direction,
+ * summing loads and stores into one number is what hid the direction
+ * before this split.  The direction of
+ * each access comes from the semantic role the architecture's operand
+ * parser assigns to the memory operand (a store has it as its TARGET, a
+ * load as its SOURCE); on x86, cmp/test/bt count as loads even when the
+ * memory operand is the target (they only read it,
+ * x86__ins_target_is_read_only()).
  */
 struct type_hist_entry {
-	int nr_samples;
-	u64 period;
+	int nr_samples_load;
+	int nr_samples_store;
+	u64 period_load;
+	u64 period_store;
 };
 
 /**
@@ -240,7 +256,7 @@ struct annotated_data_type *find_data_type(struct data_loc_info *dloc);
 /* Update type access histogram at the given offset */
 int annotated_data_type__update_samples(struct annotated_data_type *adt,
 					struct evsel *evsel, int offset,
-					int nr_samples, u64 period);
+					int nr_samples, u64 period, bool is_store);
 
 /* Release all data type information in the tree */
 void annotated_data_type__tree_delete(struct rb_root *root);
@@ -284,7 +300,8 @@ annotated_data_type__update_samples(struct annotated_data_type *adt __maybe_unus
 				    struct evsel *evsel __maybe_unused,
 				    int offset __maybe_unused,
 				    int nr_samples __maybe_unused,
-				    u64 period __maybe_unused)
+				    u64 period __maybe_unused,
+				    bool is_store __maybe_unused)
 {
 	return -1;
 }

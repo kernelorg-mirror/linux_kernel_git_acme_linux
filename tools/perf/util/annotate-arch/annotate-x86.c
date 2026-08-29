@@ -183,6 +183,48 @@ static bool intel__ins_is_fused(const struct arch *arch, const char *ins1,
 	return false;
 }
 
+/*
+ * The load/store direction is taken from the semantic role the
+ * architecture's operand parser assigns to the memory operand: a store
+ * has it as its TARGET, a load as its SOURCE.  Mnemonic-aware parsers
+ * already place it in the slot matching the access direction, so the
+ * general rule needs no per-architecture table.
+ *
+ * This function exists because the x86 parser follows the AT&T syntax
+ * text convention instead, labeling the second textual operand as the
+ * target whether or not the instruction writes it.  These x86
+ * mnemonics read the memory operand while it sits in the target slot:
+ * cmp, test and bt (with an optional b/w/l/q size suffix, but not
+ * bts/btr/btc).  cmpxchg (including cmpxchg8b and cmpxchg16b) also
+ * starts with "cmp" but modifies memory, as do xchg and bts/btr/btc, so
+ * they remain stores, matching the RMW semantics where an instruction
+ * that takes the cacheline exclusive counts as a store.
+ *
+ * cmov is not in that list even though it only reads its memory operand:
+ * its destination is architecturally a register, so the memory operand is
+ * always the source and the general rule already counts it as a load.
+ *
+ * The caller scopes this to x86 with arch__is_x86(): on other
+ * architectures these mnemonics either don't take a memory operand
+ * (arm64 and powerpc cmp) or their parsers assign the roles
+ * semantically, so the fix-up must not run there.
+ */
+bool x86__ins_target_is_read_only(const struct ins *ins)
+{
+	const char *name = ins->name;
+
+	if (strstarts(name, "cmp"))
+		return !strstarts(name, "cmpxchg");
+
+	if (strstarts(name, "bt")) {
+		const char *sfx = name + 2;
+
+		return !*sfx || strchr("bwlq", *sfx);
+	}
+
+	return strstarts(name, "test");
+}
+
 static int x86__cpuid_parse(struct arch *arch, const char *cpuid)
 {
 	unsigned int family, model, stepping;

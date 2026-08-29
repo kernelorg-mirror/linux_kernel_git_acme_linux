@@ -3068,11 +3068,43 @@ __hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
 
 		if (symbol_conf.annotate_data_sample) {
 			struct evsel *evsel = hists_to_evsel(he->hists);
+			/*
+			 * The direction comes from the semantic role the
+			 * arch's operand parser assigns to the memory
+			 * operand: a store has it as its TARGET, a load as
+			 * its SOURCE.  x86's parser follows the AT&T syntax
+			 * text convention instead, so instructions that
+			 * only read the memory operand while it sits in the
+			 * target slot (cmp, test, bt) must be
+			 * corrected to loads.
+			 */
+			bool is_store = (i == INSN_OP_TARGET) &&
+					!(arch__is_x86(arch) &&
+					  x86__ins_target_is_read_only(&dl->ins));
+
+			/*
+			 * The direction the hardware saw wins over the
+			 * parser's when it says something definitive: on
+			 * PMUs with a single load/store event (AMD IBS) the
+			 * parser can misread instructions the hardware
+			 * classified correctly, and the aggregate JSON and
+			 * the per-sample CTF deliverables must classify the
+			 * same sample the same way.
+			 */
+			if (he->mem_info) {
+				u8 hw_op = mem_info__data_src(he->mem_info)->mem_op;
+
+				if (hw_op & PERF_MEM_OP_STORE)
+					is_store = true;
+				else if (hw_op & PERF_MEM_OP_LOAD)
+					is_store = false;
+			}
 
 			annotated_data_type__update_samples(mem_type, evsel,
 							    dloc.type_offset,
 							    he->stat.nr_events,
-							    he->stat.period);
+							    he->stat.period,
+							    is_store);
 		}
 		*type_offset = dloc.type_offset;
 		return mem_type ?: NO_TYPE;

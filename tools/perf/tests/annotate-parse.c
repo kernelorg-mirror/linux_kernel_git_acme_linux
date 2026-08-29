@@ -172,8 +172,69 @@ static int test__mov_ops_parse(struct test_suite *t __maybe_unused, int subtest 
 	return 0;
 }
 
+/*
+ * Where the operand lands decides the load/store direction, but whether the
+ * target is written at all is decided here: a memory operand that is only
+ * read is a load whichever slot it is in.  It is prefix logic, "bt" reads
+ * and "bts" writes, so the failure mode is a silent misclassification
+ * rather than a parse error, and no amount of reading the code makes the
+ * whole table obvious.
+ *
+ * The function is x86 specific but the decision is pure string matching on
+ * the instruction name, so this runs everywhere the symbol is linked in,
+ * which is always, see util/annotate-arch/Build.
+ */
+struct read_only_case {
+	const char *name;
+	bool read_only;
+};
+
+static const struct read_only_case read_only_cases[] = {
+	/* cmp: reads both operands, cmpxchg: writes its target. */
+	{ .name = "cmp",	.read_only = true  },
+	{ .name = "cmpq",	.read_only = true  },
+	{ .name = "cmpxchg",	.read_only = false },
+	{ .name = "cmpxchg16b",	.read_only = false },
+	/*
+	 * bt with no suffix or with a size suffix only tests the bit, while
+	 * bts/btr/btc set, reset or complement it, so they write.
+	 */
+	{ .name = "bt",		.read_only = true  },
+	{ .name = "btq",	.read_only = true  },
+	{ .name = "bts",	.read_only = false },
+	{ .name = "btr",	.read_only = false },
+	{ .name = "btc",	.read_only = false },
+	/* test: reads both operands. */
+	{ .name = "test",	.read_only = true  },
+	{ .name = "testb",	.read_only = true  },
+	/* Everything else writes its target. */
+	{ .name = "cmovne",	.read_only = false },
+	{ .name = "mov",	.read_only = false },
+	{ .name = "xchg",	.read_only = false },
+};
+
+static int test__x86_ins_target_is_read_only(struct test_suite *t __maybe_unused,
+					    int subtest __maybe_unused)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(read_only_cases); i++) {
+		const struct read_only_case *c = &read_only_cases[i];
+		struct ins ins = { .name = c->name };
+		bool read_only = x86__ins_target_is_read_only(&ins);
+
+		if (read_only != c->read_only)
+			pr_debug("FAILED %s: read_only %d != %d\n",
+				 c->name, read_only, c->read_only);
+
+		TEST_ASSERT_VAL("wrong read-only classification",
+				read_only == c->read_only);
+	}
+
+	return 0;
+}
+
 static struct test_case tests__annotate_parse[] = {
 	TEST_CASE("x86 mov_ops operand parsing", mov_ops_parse),
+	TEST_CASE("x86 ins target is read only", x86_ins_target_is_read_only),
 	{ .name = NULL, }
 };
 
