@@ -2019,6 +2019,46 @@ int hist_entry__annotate_data_tty(struct hist_entry *he, struct evsel *evsel)
  * replaced with U+FFFD, the Unicode replacement character, instead of
  * emitting raw bytes that strict JSON consumers reject.
  */
+void annotated_data_stat__print(struct annotated_data_stat *s)
+{
+#define PRINT_STAT(fld) if (s->fld) printf("%10d : %s\n", s->fld, #fld)
+
+	int bad = s->no_sym +
+			s->no_insn +
+			s->no_insn_ops +
+			s->no_mem_ops +
+			s->no_reg +
+			s->no_dbginfo +
+			s->no_cuinfo +
+			s->no_var +
+			s->no_typeinfo +
+			s->invalid_size +
+			s->bad_offset +
+			s->bad_addr;
+	int ok = s->total - bad;
+
+	printf("Annotate data type stats:\n");
+	printf("total %d, ok %d (%.1f%%), bad %d (%.1f%%)\n",
+		s->total, ok, 100.0 * ok / (s->total ?: 1), bad, 100.0 * bad / (s->total ?: 1));
+	printf("-----------------------------------------------------------\n");
+	PRINT_STAT(no_sym);
+	PRINT_STAT(no_insn);
+	PRINT_STAT(no_insn_ops);
+	PRINT_STAT(no_mem_ops);
+	PRINT_STAT(no_reg);
+	PRINT_STAT(no_dbginfo);
+	PRINT_STAT(no_cuinfo);
+	PRINT_STAT(no_var);
+	PRINT_STAT(no_typeinfo);
+	PRINT_STAT(invalid_size);
+	PRINT_STAT(bad_offset);
+	PRINT_STAT(bad_addr);
+	PRINT_STAT(insn_track);
+	printf("\n");
+
+#undef PRINT_STAT
+}
+
 static void json_escape(FILE *fp, const char *str)
 {
 	if (!str)

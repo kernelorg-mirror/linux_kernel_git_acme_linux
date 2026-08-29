@@ -189,6 +189,8 @@ struct annotated_data_stat {
 };
 extern struct annotated_data_stat ann_data_stat;
 
+void annotated_data_stat__print(struct annotated_data_stat *s);
+
 #ifdef HAVE_LIBDW_SUPPORT
 /*
  * Type information in a register, valid when @ok is true.

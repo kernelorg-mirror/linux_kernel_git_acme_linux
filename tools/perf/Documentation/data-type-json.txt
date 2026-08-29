@@ -1,0 +1,93 @@
+The profile is a single JSON object with three entries.  The first one,
+"version", is the schema version, currently 1, so that consumers can tell
+what they are parsing instead of guessing from field presence.
++
+The second one, "machine", describes the machine the profile was captured
+on: the same information 'perf report --header-only' prints for the
+perf.data file - hostname, OS release, perf version, arch, the number of
+online and available CPUs, the CPU description and CPUID, the total
+memory, the perf command line and the mtime of the perf.data file as seen
+on the machine doing the analysis (for profiles copied from another box
+that is when the file was copied there, not when it was recorded) - plus
+the cacheline size the histograms were collected with, which is what
+groups the byte offsets below into cachelines.
++
+The third one, "dsos", has one entry per DSO (binary) that had types
+with hits in it: its name, its build ID and, inside it, one entry per
+type with its size, its member tree, where a member whose children were
+cut off at the member nesting bound carries "truncated": true so that a
+consumer can tell it from one whose tree really ends there, and its
+per-event, per-byte-offset access histograms, with loads and stores
+counted in separate counters (the same offset is read at one call site
+and written at another, so the direction is not a property of the
+offset).
++
+This is the DSO centric view a consumer such as pahole needs: pahole
+works on one DSO per session, so it takes the profile, looks up the entry
+for the build ID of the binary it is analyzing and gets exactly the types
+of that binary that were hit, together with the machine the profile came
+from.  The build ID, not the path, is the portable identity: paths differ
+across machines, while a build ID lets a consumer fetch the exact
+matching binary or debuginfo from the ~/.debug build-id cache or
+debuginfod and verify it is looking at the same binary that was profiled,
+instead of only guessing from the type size that it is.  A null build ID
+means "unverified": the consumer falls back to name and size matching.
++
+Carrying the DSO identity is also what will allow, in the future, a type
+centric view for the data structures that are part of an ABI: with it the
+same library build - the same build ID - can be compared across
+workloads, and the structures shared across an ABI boundary, be it a libc
+or a vDSO structure, or one that an out of tree kernel module shares with
+the kernel, can be tracked as they change from release to release.  That
+is not implemented yet, neither in perf nor in its consumers: what is
+here is the identity they need for it.
++
+For example, with the entries that do not matter here elided:
++
+....
+$ perf report -s type --data-type-json=profile.json
+$ head -40 profile.json
+{
+    "version": 1,
+    "machine": {
+        "hostname": "i7",
+        "os_release": "7.2.0+",
+        "perf_version": "7.2.rc4.gf1251ec08cc2",
+        "arch": "x86_64",
+        "nrcpus_online": 28,
+        "nrcpus_avail": 28,
+        "cpudesc": "Intel(R) Core(TM) i7-14700K",
+        "cpuid": "GenuineIntel,6,183,1",
+        "total_memory_kb": 32606104,
+        "cmdline": [ "/home/acme/bin/perf", "mem", "record", "-a", "sleep", "10" ],
+        "captured_on": "Sun Aug 30 14:21:57 2026",
+        "cacheline_size": 64
+    },
+    "dsos": [
+        { "dso": "/home/acme/.debug/.build-id/de/e74c8201f55d32c8e78fb367b41661c177aaa4/elf",
+            "build_id": "dee74c8201f55d32c8e78fb367b41661c177aaa4",
+            "types": [
+                { "type": "struct rb_node",
+                    "size": 24,
+                    "members": [
+                        { "type": "long unsigned int", "name": "__rb_parent_color", "offset": 0, "size": 8 },
+                        { "type": "struct rb_node*", "name": "rb_right", "offset": 8, "size": 8 },
+                        { "type": "struct rb_node*", "name": "rb_left", "offset": 16, "size": 8 } ],
+                    "histograms": [
+                        { "event": "cpu_core/mem-loads,ldlat=30/",
+                            "total_samples": 228,
+                            "total_period": 15819,
+                            "samples": [ { "offset": 0, "nr_samples_load": 157, "nr_samples_store": 0, "period_load": 10997, "period_store": 0 },
+                                         { "offset": 8, "nr_samples_load": 15, "nr_samples_store": 0, "period_load": 1130, "period_store": 0 },
+                                         { "offset": 16, "nr_samples_load": 56, "nr_samples_store": 0, "period_load": 3692, "period_store": 0 } ] },
+                        ...
+                    ] }
+            ] }
+    ]
+}
+....
++
+pahole consumes it with its --perf-data-type option, see the pahole(1)
+man page.  The full schema is documented in the exporter's header comment
+in util/annotate-data.c.
++

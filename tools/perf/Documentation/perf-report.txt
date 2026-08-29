@@ -498,6 +498,25 @@ OPTIONS
 	different than the default value of hist entries.  Please see the
 	--call-graph option for details.
 
+--data-type-json=file::
+	Write the data-type access profile as JSON to 'file' (or '-' for
+	stdout) instead of displaying it.  Requires '--sort type'.
++
+include::data-type-json.txt[]
+
+--type-stat::
+	Show stats for the data type annotation after the profile is
+	written.  The 'bad_addr' counter counts samples that were dropped
+	during the data type resolution: their data address falls outside
+	the memory range of the variable that the recorded IP resolves to,
+	so the recorded IP did not perform the access.  This happens when
+	the PEBS IP fixup fails, typically for a store sampled while the
+	thread was running an interrupt handler: the recorded IP is the
+	userspace instruction that was interrupted, while the access went
+	to the kernel stack.  Such samples are counted and excluded
+	instead of being attributed to a member the recorded instruction
+	never touched.
+
 --percentage::
 	Determine how to display the CPU and latency overhead percentage
 	of filtered entries. Filters can be applied by --comms, --dsos, --symbols

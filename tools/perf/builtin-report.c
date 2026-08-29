@@ -11,6 +11,7 @@
 #include "util/config.h"
 
 #include "util/annotate.h"
+#include "util/annotate-data.h"
 #include "util/color.h"
 #include "util/dso.h"
 #include <linux/list.h>
@@ -109,6 +110,8 @@ struct report {
 	const char		*cpu_list;
 	const char		*symbol_filter_str;
 	const char		*time_str;
+	const char		*json_file;
+	bool			type_stat;
 	struct perf_time_interval *ptime_range;
 	int			range_size;
 	int			range_num;
@@ -1138,6 +1141,20 @@ static int __cmd_report(struct report *rep)
 		return ret;
 	}
 
+	/*
+	 * Converter mode: the per-offset histograms are complete once the
+	 * entries have been collapsed, write the document and be done.  Do
+	 * it before the no-samples early return so that a tool driving this
+	 * always gets a document, an empty profile just gets "dsos": [],
+	 * rather than a possibly stale file from a previous run.
+	 */
+	if (rep->json_file) {
+		ret = perf_session__annotate_data_to_json(session, rep->json_file);
+		if (rep->type_stat)
+			annotated_data_stat__print(&ann_data_stat);
+		return ret;
+	}
+
 	if (session_done())
 		return 0;
 
@@ -1449,6 +1466,10 @@ int cmd_report(int argc, const char **argv)
 		    "Show a column with the sum of periods"),
 	OPT_BOOLEAN_SET(0, "group", &symbol_conf.event_group, &report.group_set,
 		    "Show event group information together"),
+	OPT_STRING(0, "data-type-json", &report.json_file, "file",
+		   "Save data-type profiling histograms as JSON to <file> ('-' for stdout)"),
+	OPT_BOOLEAN(0, "type-stat", &report.type_stat,
+		    "Show stats for the data type annotation"),
 	OPT_INTEGER(0, "group-sort-idx", &symbol_conf.group_sort_idx,
 		    "Sort the output by the event at the index n in group. "
 		    "If n is invalid, sort by the first event. "
@@ -1749,6 +1770,27 @@ repeat:
 			sort_order = NULL;
 	}
 
+	if (report.json_file) {
+		/*
+		 * JSON export reuses the data-type access histograms, so
+		 * make sure they are populated and force stdio output.
+		 * Require -s type (or field-order containing "type").
+		 *
+		 * This is a converter mode: after writing the file there is
+		 * nothing left to do, so also skip the perf.data header hint
+		 * and don't hand the (by then empty) stdout to a pager.
+		 */
+		if (!(sort_order && strstr(sort_order, "type")) &&
+		    !(field_order && strstr(field_order, "type"))) {
+			pr_err("--data-type-json requires -s type for data-type profiling\n");
+			ret = -EINVAL;
+			goto error;
+		}
+		symbol_conf.annotate_data_sample = true;
+		symbol_conf.annotate_data_member = true;
+		use_browser = 0;
+	}
+
 	if ((sort_order && strstr(sort_order, "type")) ||
 	    (field_order && strstr(field_order, "type"))) {
 		report.data_type = true;
@@ -1764,7 +1806,7 @@ repeat:
 	}
 
 	if (strcmp(input_name, "-") != 0)
-		setup_browser(true);
+		setup_browser(!report.json_file);
 	else
 		use_browser = 0;
 
@@ -1846,8 +1888,8 @@ repeat:
 			ret = 0;
 			goto error;
 		}
-	} else if (use_browser == 0 && !quiet &&
-		   !report.stats_mode && !report.tasks_mode) {
+	} else if (use_browser == 0 && !quiet && !report.stats_mode &&
+		   !report.tasks_mode && !report.json_file) {
 		fputs("# To display the perf.data header info, please use --header/--header-only options.\n#\n",
 		      stdout);
 	}
