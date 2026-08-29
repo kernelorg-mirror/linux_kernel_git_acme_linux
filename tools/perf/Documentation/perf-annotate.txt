@@ -178,6 +178,12 @@ include::itrace.txt[]
 	that case it'd show annotation for the type only, otherwise it'd show
 	all data types it finds.
 
+--data-type-json=file::
+	Write the data-type access profile as JSON to 'file' (or '-' for
+	stdout) instead of displaying it.  Requires '--data-type'.
++
+include::data-type-json.txt[]
+
 --type-stat::
 	Show stats for the data type annotation.
 
