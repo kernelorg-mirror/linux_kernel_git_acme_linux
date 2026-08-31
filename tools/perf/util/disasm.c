@@ -598,6 +598,29 @@ static bool check_multi_regs(const struct arch *arch, const char *op)
 	return count > 1;
 }
 
+/*
+ * Return the comma that precedes the last operand of an instruction, that
+ * is, the last one that is not part of a memory reference such as
+ * 0x8(%rax,%rcx,1), or NULL when the operands are not separated at all.
+ */
+static char *last_operand_separator(char *str)
+{
+	char *last = NULL;
+	int depth = 0;
+
+	for (char *p = str; *p != '\0'; p++) {
+		if (*p == '(')
+			depth++;
+		else if (*p == ')') {
+			if (depth > 0)
+				depth--;
+		} else if (*p == ',' && depth == 0)
+			last = p;
+	}
+
+	return last;
+}
+
 static int mov__parse(const struct arch *arch, struct ins_operands *ops,
 		      struct map_symbol *ms __maybe_unused,
 		      struct disasm_line *dl __maybe_unused)
@@ -651,6 +674,50 @@ static int mov__parse(const struct arch *arch, struct ins_operands *ops,
 
 	ops->target.multi_regs = check_multi_regs(arch, ops->target.raw);
 
+	/*
+	 * The split above assumes the two operand "source, target" form, but
+	 * AT&T lists the sources before the destination, so with three or
+	 * more operands, e.g. "imul $0x3e8,0x8(%rdx),%rax", everything after
+	 * the first comma ends up in the target and a memory operand that is
+	 * only read is taken as the target, that is, as a store.
+	 *
+	 * Re-split in that case, keeping every source in the source slot so
+	 * that the whole operand list is still there when the instruction is
+	 * printed: the destination is the last operand, so 0x8(%rdx) above is
+	 * profiled as a load instead of a store.
+	 */
+	if (last_operand_separator(ops->target.raw) != NULL) {
+		size_t len = strlen(ops->source.raw) + strlen(ops->target.raw) + 2;
+		char *sep, *src, *tgt, *raw;
+
+		raw = malloc(len);
+		if (raw == NULL)
+			goto out_free_target;
+
+		scnprintf(raw, len, "%s,%s", ops->source.raw, ops->target.raw);
+
+		sep = last_operand_separator(raw);
+		*sep = '\0';
+
+		src = strdup(raw);
+		tgt = strdup(skip_spaces(sep + 1));
+		free(raw);
+
+		if (src == NULL || tgt == NULL) {
+			zfree(&src);
+			zfree(&tgt);
+			goto out_free_target;
+		}
+
+		zfree(&ops->source.raw);
+		zfree(&ops->target.raw);
+
+		ops->source.raw = src;
+		ops->target.raw = tgt;
+		ops->source.multi_regs = check_multi_regs(arch, ops->source.raw);
+		ops->target.multi_regs = check_multi_regs(arch, ops->target.raw);
+	}
+
 	if (comment == NULL)
 		return 0;
 
@@ -660,6 +727,8 @@ static int mov__parse(const struct arch *arch, struct ins_operands *ops,
 
 	return 0;
 
+out_free_target:
+	zfree(&ops->target.raw);
 out_free_source:
 	zfree(&ops->source.raw);
 	return -1;

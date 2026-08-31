@@ -2594,6 +2594,40 @@ static int arch__dwarf_regnum(const struct arch *arch, const char *str)
 }
 
 /*
+ * AT&T lists the sources before the destination, so with three or more
+ * operands the memory reference is not the first one: the source operand
+ * list of "imul $0x3e8,0x8(%rdx),%rax" is "$0x3e8,0x8(%rdx)".  Return @str
+ * advanced to the operand that carries the memory reference, or unchanged
+ * when none of them does.
+ */
+static const char *skip_to_memory_operand(const char *str)
+{
+	const char *start = str;
+	const char *p;
+	int depth = 0;
+	bool mem = false;
+
+	/*
+	 * There is no bound on @p: being a C string, @str always ends in a
+	 * NUL, and the NUL case below is the only way out of the loop.
+	 */
+	for (p = str; ; p++) {
+		if (*p == '(') {
+			depth++;
+			mem = true;
+		} else if (*p == ')') {
+			if (depth > 0)
+				depth--;
+		} else if (*p == ',' && depth == 0) {
+			if (mem)
+				return start;
+			start = p + 1;
+		} else if (*p == '\0')
+			return mem ? start : str;
+	}
+}
+
+/*
  * Get register number and access offset from the given instruction.
  * It assumes AT&T x86 asm format like OFFSET(REG).  Maybe it needs
  * to revisit the format when it handles different architecture.
@@ -2606,6 +2640,9 @@ static int extract_reg_offset(const struct arch *arch, const char *str,
 
 	if (arch->objdump.register_char == 0)
 		return -1;
+
+	/* With three or more operands the memory operand is not the first. */
+	str = skip_to_memory_operand(str);
 
 	/*
 	 * It should start from offset, but it's possible to skip 0
