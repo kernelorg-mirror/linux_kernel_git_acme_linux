@@ -152,6 +152,7 @@ int die_get_scopes(Dwarf_Die *cu_die, Dwarf_Addr pc, Dwarf_Die **scopes);
 struct die_var_type {
 	struct die_var_type *next;
 	u64 die_off;
+	int die_tag;
 	u64 addr;
 	u64 end;        /* end address of location range */
 	int reg;
@@ -182,6 +183,30 @@ Dwarf_Die *die_find_variable_by_addr(Dwarf_Die *sc_die, Dwarf_Addr addr,
 
 /* Save all variables and parameters in this scope */
 void die_collect_vars(Dwarf_Die *sc_die, struct die_var_type **var_types);
+
+/*
+ * Get the type DIE saved by die_collect_vars()/die_collect_global_vars().
+ *
+ * The offsets those save are the dwarf_dieoffset() of the type DIE, which is
+ * relative to the debug file that DIE lives in: the dwz common file, the alt
+ * file in libdw terms, for the types shared by more than one CU, the main
+ * file for the rest.  Resolving an alt file offset in the main file does not
+ * fail: dwarf_offdie() parses whatever is at that offset there, and an offset
+ * that is a CU header in the main file reads back as a typedef whose
+ * DW_AT_type refers to itself, which is what hung 'perf report -s type' on
+ * the dwz compressed debug info of zlib-ng (libz.so.1).
+ *
+ * So look at the main file first and then at the alt file, and use whichever
+ * one has a DIE with the tag the type had when it was collected.
+ *
+ * The tag is a heuristic, not an identity: if an offset happens to parse in
+ * both files as a DIE with the same tag, e.g. a pointer type, the main file
+ * is picked and the type may well be the wrong one, what the bounds on the
+ * type chasers guarantee is that a wrong pick, like a misparse, makes perf
+ * give up on the type, told about by pr_debug, rather than hang.
+ */
+Dwarf_Die *die_get_type_die(Dwarf *dbg, u64 die_off, int die_tag,
+			    Dwarf_Die *die_mem);
 
 /* Save all global variables in this CU */
 void die_collect_global_vars(Dwarf_Die *cu_die, struct die_var_type **var_types);
