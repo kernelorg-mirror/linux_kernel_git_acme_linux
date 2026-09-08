@@ -171,6 +171,20 @@ include::itrace.txt[]
 --type-stat::
 	Show stats for the data type annotation.
 
+	The 'bad_addr' counter counts samples that were dropped during the
+	data type resolution: their data address is not the one the
+	instruction's PC-relative operand computes, so the recorded IP did
+	not perform the access.  This happens when the PEBS IP fixup
+	fails, typically for a store sampled while the thread was running
+	an interrupt handler: the recorded IP is the userspace instruction
+	that was interrupted, while the access went to the kernel stack.
+	Such samples are counted and excluded instead of being attributed
+	to a member the recorded instruction never touched.  Only samples
+	resolved through a PC-relative operand are tested: its address is
+	fixed by the instruction; accesses through registers depend on
+	the register contents at sample time and there is nothing to test
+	them against.
+
 --skip-empty::
 	Do not display empty (or dummy) events.
 

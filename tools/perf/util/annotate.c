@@ -20,6 +20,7 @@
 #include "env.h"
 #include "map.h"
 #include "maps.h"
+#include "mem-info.h"
 #include "symbol.h"
 #include "srcline.h"
 #include "units.h"
@@ -2956,24 +2957,66 @@ __hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
 			.op = op_loc,
 			.di = dbg,
 		};
+		bool pcrel = false;
 
 		if (!op_loc->mem_ref && op_loc->segment == INSN_SEG_NONE)
 			continue;
 
-		/* PC-relative addressing */
+		/*
+		 * PC-relative addressing: the operand has a fixed address,
+		 * computed from the disassembly, and it stays in the
+		 * objdump address space, which is the address space the
+		 * DWARF variable lookup needs: find_data_type() matches
+		 * var_addr against the DW_OP_addr values of the variables
+		 * in the debug info, which are link addresses.
+		 */
 		if (op_loc->reg1 == DWARF_REG_PC) {
 			dloc.var_addr = annotate_calc_pcrel(ms, dloc.ip,
 							    op_loc->offset, dl);
+			pcrel = true;
 		}
 
-		/* This CPU access in kernel - pretend PC-relative addressing */
+		/*
+		 * This CPU access in kernel - pretend PC-relative addressing:
+		 * var_addr holds a per-cpu offset, not an address, so the
+		 * data address test below, which is for operands with a
+		 * fixed address, must not apply to it; set pcrel to false
+		 * to make that so by construction, instead of relying on
+		 * the ordering relative to the PC-relative branch above.
+		 */
 		if (dso__kernel(map__dso(ms->map)) && arch__is_x86(arch) &&
 		    op_loc->segment == INSN_SEG_X86_GS && op_loc->imm) {
 			dloc.var_addr = op_loc->offset;
 			op_loc->reg1 = DWARF_REG_PC;
+			pcrel = false;
 		}
 
 		mem_type = find_data_type(&dloc);
+
+		/*
+		 * The data address of a sample resolved through a
+		 * PC-relative operand is the address the instruction's
+		 * operand computes: disp(%rip) has no runtime component, so
+		 * the hardware can produce exactly one address for it, and
+		 * the test is equality, not a range inside the resolved
+		 * variable.  The two sides are in different address spaces:
+		 * the operand address is in the objdump address space, what
+		 * the DWARF lookup needs, while the data address of the
+		 * sample is in the memory address space, so
+		 * map__objdump_2mem() is what converts it, being the inverse
+		 * of the map__rip_2objdump() that annotate_calc_pcrel()
+		 * ended with.
+		 */
+		if (mem_type != NULL && pcrel && he->mem_info) {
+			u64 addr = mem_info__daddr(he->mem_info)->addr;
+			u64 mem_addr = map__objdump_2mem(ms->map, dloc.var_addr);
+
+			if (addr != 0 && addr != mem_addr) {
+				ann_data_stat.bad_addr++;
+				istat->bad++;
+				return NO_TYPE;
+			}
+		}
 
 		if (mem_type == NULL && is_stack_canary(arch, op_loc)) {
 			istat->good++;

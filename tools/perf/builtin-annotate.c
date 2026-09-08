@@ -343,7 +343,8 @@ static void print_annotate_data_stat(struct annotated_data_stat *s)
 			s->no_var +
 			s->no_typeinfo +
 			s->invalid_size +
-			s->bad_offset;
+			s->bad_offset +
+			s->bad_addr;
 	int ok = s->total - bad;
 
 	printf("Annotate data type stats:\n");
@@ -361,6 +362,7 @@ static void print_annotate_data_stat(struct annotated_data_stat *s)
 	PRINT_STAT(no_typeinfo);
 	PRINT_STAT(invalid_size);
 	PRINT_STAT(bad_offset);
+	PRINT_STAT(bad_addr);
 	PRINT_STAT(insn_track);
 	printf("\n");
 

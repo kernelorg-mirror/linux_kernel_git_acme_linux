@@ -148,6 +148,8 @@ struct data_loc_info {
  * @no_typeinfo: Failed to get a type info for the variable
  * @invalid_size: Failed to get a size info of the type
  * @bad_offset: The access offset is out of the type
+ * @bad_addr: The data address is not the one the IP's PC-relative
+ * operand accesses
  */
 struct annotated_data_stat {
 	int total;
@@ -162,6 +164,7 @@ struct annotated_data_stat {
 	int no_typeinfo;
 	int invalid_size;
 	int bad_offset;
+	int bad_addr;
 	int insn_track;
 };
 extern struct annotated_data_stat ann_data_stat;
