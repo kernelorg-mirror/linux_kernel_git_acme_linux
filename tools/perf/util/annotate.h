@@ -26,6 +26,8 @@ struct addr_map_symbol;
 struct option;
 struct perf_sample;
 struct symbol;
+struct thread;
+struct debuginfo;
 struct annotated_data_type;
 
 #define ANNOTATION__IPC_WIDTH 6
@@ -589,6 +591,19 @@ int annotate_get_insn_location(const struct arch *arch, struct disasm_line *dl,
 
 /* Returns a data type from the sample instruction (if any) */
 struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he);
+
+/*
+ * Same, without a hist entry: for consumers walking the sample stream
+ * instead of the collapsed histograms, like 'perf data convert'.
+ */
+struct annotated_data_type *annotate_resolve_data_type(struct map_symbol *ms,
+						       u64 ip,
+						       struct thread *thread,
+						       u8 cpumode,
+						       struct evsel *evsel,
+						       int *type_offset,
+						       bool *is_store,
+						       u64 addr);
 
 struct annotated_item_stat {
 	struct list_head list;

@@ -783,9 +783,10 @@ static int disasm_line__print(struct disasm_line *dl, u64 start, int addr_fmt_wi
 }
 
 static struct annotated_data_type *
-__hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
-			    struct debuginfo *dbg, struct disasm_line *dl,
-			    int *type_offset);
+annotate_get_data_type(struct map_symbol *ms, struct thread *thread,
+		       u8 cpumode, struct debuginfo *dbg,
+		       struct disasm_line *dl, const struct arch *arch,
+		       int *type_offset, bool *is_store, u64 addr);
 
 static bool needs_type_info(struct annotated_data_type *data_type)
 {
@@ -929,8 +930,13 @@ annotation_line__print(struct annotation_line *al, struct annotation_print_data 
 			struct annotated_data_type *data_type;
 			int offset = 0;
 
-			data_type = __hist_entry__get_data_type(apd->he, apd->arch,
-								apd->dbg, dl, &offset);
+			data_type = annotate_get_data_type(&apd->he->ms,
+							   apd->he->thread,
+							   apd->he->cpumode,
+							   apd->dbg, dl,
+							   apd->arch, &offset,
+							   /*is_store=*/NULL,
+							   /*addr=*/0);
 			if (needs_type_info(data_type)) {
 				char buf[4096];
 
@@ -2089,7 +2095,11 @@ static int disasm_line__snprint_type_info(struct disasm_line *dl,
 	}
 
 	if (data_type == NULL)
-		data_type = __hist_entry__get_data_type(apd->he, apd->arch, apd->dbg, dl, &offset);
+		data_type = annotate_get_data_type(&apd->he->ms, apd->he->thread,
+						   apd->he->cpumode, apd->dbg,
+						   dl, apd->arch, &offset,
+						   /*is_store=*/NULL,
+						   /*addr=*/0);
 
 	if (apd->type_hash && entry == NULL) {
 		entry = malloc(sizeof(*entry));
@@ -2948,12 +2958,60 @@ void debuginfo_cache__delete(void)
 	di_cache.dbg = NULL;
 }
 
-static struct annotated_data_type *
-__hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
-			    struct debuginfo *dbg, struct disasm_line *dl,
-			    int *type_offset)
+/*
+ * The debug info of the DSO @ms is in, parsed once and kept for the next
+ * accesses: both the hist entry and the sample stream consumers resolve
+ * many accesses in a row in the same DSO.
+ */
+static struct debuginfo *debuginfo_cache__get(struct map_symbol *ms)
 {
-	struct map_symbol *ms = &he->ms;
+	/*
+	 * di_cache holds a pair of values, but code below assumes
+	 * di_cache.dso can be compared/updated and di_cache.dbg can be
+	 * read/updated independently from each other. That assumption only
+	 * holds in single threaded code.
+	 */
+	assert(perf_singlethreaded);
+
+	if (map__dso(ms->map) != di_cache.dso) {
+		dso__put(di_cache.dso);
+		di_cache.dso = dso__get(map__dso(ms->map));
+
+		debuginfo__delete(di_cache.dbg);
+		di_cache.dbg = dso__debuginfo(di_cache.dso);
+	}
+
+	return di_cache.dbg;
+}
+
+/**
+ * annotate_get_data_type - find the data type an instruction accesses
+ * @ms: map and symbol the instruction is in
+ * @thread: thread the sample came from
+ * @cpumode: CPU mode the sample was taken in
+ * @dbg: debug info of @ms's DSO, where the variable is looked up
+ * @dl: the instruction, disassembled
+ * @arch: architecture @dl was disassembled for
+ * @type_offset: out, offset of the access within the type
+ * @is_store: out, whether the memory operand is written (may be NULL)
+ *
+ * The hist_entry-free core of the data type resolution: it takes the
+ * memory operand of @dl and looks the variable it addresses up in @dbg.
+ * Sample accounting is left to the caller, so that a consumer walking the
+ * sample stream can share this without a hist entry to account into.
+ *
+ * Return: the type found, NO_TYPE when the instruction has no memory
+ * operand that could be resolved, or NULL when the caller should retry
+ * with the previous instruction (fused instructions, where the memory
+ * access came from the first one).  @type_offset and @is_store are only
+ * meaningful when a type is returned.
+ */
+static struct annotated_data_type *
+annotate_get_data_type(struct map_symbol *ms, struct thread *thread,
+		       u8 cpumode, struct debuginfo *dbg,
+		       struct disasm_line *dl, const struct arch *arch,
+		       int *type_offset, bool *is_store, u64 addr)
+{
 	struct annotated_insn_loc loc;
 	struct annotated_op_loc *op_loc;
 	struct annotated_data_type *mem_type;
@@ -2987,10 +3045,10 @@ __hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
 	for_each_insn_op_loc(&loc, i, op_loc) {
 		struct data_loc_info dloc = {
 			.arch = arch,
-			.thread = he->thread,
+			.thread = thread,
 			.ms = ms,
 			.ip = ms->sym->start + dl->al.offset,
-			.cpumode = he->cpumode,
+			.cpumode = cpumode,
 			.op = op_loc,
 			.di = dbg,
 		};
@@ -3044,11 +3102,10 @@ __hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
 		 * of the map__rip_2objdump() that annotate_calc_pcrel()
 		 * ended with.
 		 */
-		if (mem_type != NULL && pcrel && he->mem_info) {
-			u64 addr = mem_info__daddr(he->mem_info)->addr;
+		if (mem_type != NULL && pcrel && addr != 0) {
 			u64 mem_addr = map__objdump_2mem(ms->map, dloc.var_addr);
 
-			if (addr != 0 && addr != mem_addr) {
+			if (addr != mem_addr) {
 				ann_data_stat.bad_addr++;
 				istat->bad++;
 				return NO_TYPE;
@@ -3066,8 +3123,7 @@ __hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
 		else
 			istat->bad++;
 
-		if (symbol_conf.annotate_data_sample) {
-			struct evsel *evsel = hists_to_evsel(he->hists);
+		if (is_store) {
 			/*
 			 * The direction comes from the semantic role the
 			 * arch's operand parser assigns to the memory
@@ -3078,33 +3134,9 @@ __hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
 			 * target slot (cmp, test, bt) must be
 			 * corrected to loads.
 			 */
-			bool is_store = (i == INSN_OP_TARGET) &&
-					!(arch__is_x86(arch) &&
-					  x86__ins_target_is_read_only(&dl->ins));
-
-			/*
-			 * The direction the hardware saw wins over the
-			 * parser's when it says something definitive: on
-			 * PMUs with a single load/store event (AMD IBS) the
-			 * parser can misread instructions the hardware
-			 * classified correctly, and the aggregate JSON and
-			 * the per-sample CTF deliverables must classify the
-			 * same sample the same way.
-			 */
-			if (he->mem_info) {
-				u8 hw_op = mem_info__data_src(he->mem_info)->mem_op;
-
-				if (hw_op & PERF_MEM_OP_STORE)
-					is_store = true;
-				else if (hw_op & PERF_MEM_OP_LOAD)
-					is_store = false;
-			}
-
-			annotated_data_type__update_samples(mem_type, evsel,
-							    dloc.type_offset,
-							    he->stat.nr_events,
-							    he->stat.period,
-							    is_store);
+			*is_store = (i == INSN_OP_TARGET) &&
+				    !(arch__is_x86(arch) &&
+				      x86__ins_target_is_read_only(&dl->ins));
 		}
 		*type_offset = dloc.type_offset;
 		return mem_type ?: NO_TYPE;
@@ -3115,23 +3147,42 @@ __hist_entry__get_data_type(struct hist_entry *he, const struct arch *arch,
 }
 
 /**
- * hist_entry__get_data_type - find data type for given hist entry
- * @he: hist entry
+ * annotate_resolve_data_type - find the data type accessed at an address
+ * @ms: map and symbol of the instruction that accessed memory
+ * @ip: address of that instruction
+ * @thread: thread the sample came from
+ * @cpumode: CPU mode the sample was taken in
+ * @evsel: event the sample came from, needed to disassemble @ms
+ * @type_offset: out, offset of the access within the type
+ * @is_store: out, whether the access was a store (may be NULL)
  *
- * This function first annotates the instruction at @he->ip and extracts
+ * This function first annotates the instruction at @ip and extracts
  * register and offset info from it.  Then it searches the DWARF debug
  * info to get a variable and type information using the address, register,
  * and offset.
+ *
+ * The debug info is cached across calls, so walking a sample stream costs
+ * one DWARF lookup per DSO instead of one per sample.
+ *
+ * Return: the type found, or NULL when it could not be resolved.
+ * @type_offset and @is_store are only meaningful for a non-NULL return.
+ * @addr is the data address of the sample the resolution is for, zero
+ * when there is none; it is what keeps samples recorded with an IP that
+ * did not perform the access from being attributed to the variable the
+ * recorded IP resolves to.
  */
-struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
+struct annotated_data_type *
+annotate_resolve_data_type(struct map_symbol *ms, u64 ip,
+			   struct thread *thread, u8 cpumode,
+			   struct evsel *evsel, int *type_offset,
+			   bool *is_store, u64 addr)
 {
-	struct map_symbol *ms = &he->ms;
-	struct evsel *evsel = hists_to_evsel(he->hists);
 	const struct arch *arch;
+	struct debuginfo *dbg;
 	struct disasm_line *dl;
 	struct annotated_data_type *mem_type;
 	struct annotated_item_stat *istat;
-	u64 ip = he->ip;
+	bool store = false;
 
 	ann_data_stat.total++;
 
@@ -3145,23 +3196,8 @@ struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
 		return NULL;
 	}
 
-	/*
-	 * di_cache holds a pair of values, but code below assumes
-	 * di_cache.dso can be compared/updated and di_cache.dbg can be
-	 * read/updated independently from each other. That assumption only
-	 * holds in single threaded code.
-	 */
-	assert(perf_singlethreaded);
-
-	if (map__dso(ms->map) != di_cache.dso) {
-		dso__put(di_cache.dso);
-		di_cache.dso = dso__get(map__dso(ms->map));
-
-		debuginfo__delete(di_cache.dbg);
-		di_cache.dbg = dso__debuginfo(di_cache.dso);
-	}
-
-	if (di_cache.dbg == NULL) {
+	dbg = debuginfo_cache__get(ms);
+	if (dbg == NULL) {
 		ann_data_stat.no_dbginfo++;
 		return NULL;
 	}
@@ -3183,10 +3219,13 @@ struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
 	}
 
 retry:
-	mem_type = __hist_entry__get_data_type(he, arch, di_cache.dbg, dl,
-					       &he->mem_type_off);
-	if (mem_type)
+	mem_type = annotate_get_data_type(ms, thread, cpumode, dbg, dl, arch,
+					  type_offset, &store, addr);
+	if (mem_type) {
+		if (is_store)
+			*is_store = store;
 		return mem_type == NO_TYPE ? NULL : mem_type;
+	}
 
 	/*
 	 * Some instructions can be fused and the actual memory access came
@@ -3210,6 +3249,57 @@ retry:
 	if (istat)
 		istat->bad++;
 	return NULL;
+}
+
+/**
+ * hist_entry__get_data_type - find data type for given hist entry
+ * @he: hist entry
+ *
+ * Resolves the type the way annotate_resolve_data_type() does and accounts
+ * the samples of @he into its histograms, which is what the data type
+ * profiling views ('perf report -s type', 'perf annotate --data-type') and
+ * their JSON export read.  The pseudo types for stack operations and for
+ * the stack canary carry no histogram, so they are not accounted.
+ */
+struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
+{
+	struct evsel *evsel = hists_to_evsel(he->hists);
+	struct annotated_data_type *mem_type;
+	bool is_store = false;
+
+	mem_type = annotate_resolve_data_type(&he->ms, he->ip, he->thread,
+					      he->cpumode, evsel,
+					      &he->mem_type_off, &is_store,
+					      he->mem_info ?
+						mem_info__daddr(he->mem_info)->addr : 0);
+
+	if (symbol_conf.annotate_data_sample && mem_type &&
+	    mem_type != &stackop_type && mem_type != &canary_type) {
+		/*
+		 * The direction the hardware saw wins over the parser's
+		 * when it says something definitive: on PMUs with a single
+		 * load/store event (AMD IBS) the parser can misread
+		 * instructions the hardware classified correctly, and the
+		 * aggregate JSON and the per-sample CTF deliverables must
+		 * classify the same sample the same way.
+		 */
+		if (he->mem_info) {
+			u8 hw_op = mem_info__data_src(he->mem_info)->mem_op;
+
+			if (hw_op & PERF_MEM_OP_STORE)
+				is_store = true;
+			else if (hw_op & PERF_MEM_OP_LOAD)
+				is_store = false;
+		}
+
+		annotated_data_type__update_samples(mem_type, evsel,
+						    he->mem_type_off,
+						    he->stat.nr_events,
+						    he->stat.period,
+						    is_store);
+	}
+
+	return mem_type;
 }
 
 /* Basic block traversal (BFS) data structure */
