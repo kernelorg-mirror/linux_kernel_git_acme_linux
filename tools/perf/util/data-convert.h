@@ -8,6 +8,8 @@ struct perf_data_convert_opts {
 	bool force;
 	bool all;
 	bool tod;
+	/* Resolve the data type each memory sample accessed (CTF only) */
+	bool data_type;
 	const char *time_str;
 };
 

@@ -44,6 +44,8 @@ static const struct option data_options[] = {
 		OPT_BOOLEAN(0, "tod", &opts.tod, "Convert time to wall clock time"),
 		OPT_BOOLEAN('f', "force", &opts.force, "don't complain, do it"),
 		OPT_BOOLEAN(0, "all", &opts.all, "Convert all events"),
+		OPT_BOOLEAN(0, "data-type", &opts.data_type,
+			    "Resolve the data type of the memory samples (CTF only)"),
 		OPT_STRING(0, "time", &opts.time_str, "str",
 			   "Time span of interest (start,stop)"),
 		OPT_END()
@@ -65,6 +67,11 @@ static int cmd_data_convert(int argc, const char **argv)
 	}
 	if (!to_json && !to_ctf) {
 		pr_err("You must specify one of --to-ctf or --to-json.\n");
+		return -1;
+	}
+
+	if (to_json && opts.data_type) {
+		pr_err("--data-type is only supported with --to-ctf.\n");
 		return -1;
 	}
 

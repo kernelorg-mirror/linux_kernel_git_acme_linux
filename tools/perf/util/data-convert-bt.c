@@ -35,6 +35,15 @@
 #include "util/sample.h"
 #include "util/time-utils.h"
 #include "header.h"
+#include "addr_location.h"
+#include "annotate.h"
+#include "annotate-data.h"
+#include "build-id.h"
+#include "dso.h"
+#include "map.h"
+#include "map_symbol.h"
+#include "symbol.h"
+#include "thread.h"
 
 #ifdef HAVE_LIBTRACEEVENT
 #include <event-parse.h>
@@ -50,6 +59,8 @@
 
 struct evsel_priv {
 	struct bt_ctf_event_class *event_class;
+	/* The samples of this event carry the resolved data type fields */
+	bool data_type;
 };
 
 #define MAX_CPUS	4096
@@ -86,6 +97,10 @@ struct ctf_writer {
 	struct bt_ctf_event_class	*fork_class;
 	struct bt_ctf_event_class	*mmap_class;
 	struct bt_ctf_event_class	*mmap2_class;
+
+	/* data type profiling of the memory samples */
+	bool				 data_type;
+	struct bt_ctf_event_class	*dso_info_class;
 };
 
 struct convert {
@@ -103,6 +118,18 @@ struct convert {
 
 	/* Ordered events configured queue size. */
 	u64			queue_size;
+
+	/*
+	 * DSOs the data types were resolved in, in id order: the id a
+	 * perf_sample record carries is its index in here plus one, so that
+	 * zero stays free for the samples no type was resolved for.  The
+	 * pointers are borrowed from the session's machines, which outlive
+	 * the conversion.
+	 */
+	struct dso		**dt_dsos;
+	size_t			dt_nr_dsos;
+	u64			dt_resolved;
+	u64			dt_bad_addr;
 };
 
 static int value_set(struct bt_ctf_field_type *type,
@@ -799,10 +826,254 @@ static bool is_flush_needed(struct ctf_stream *cs)
 	return cs->count >= STREAM_FLUSH_COUNT;
 }
 
+/*
+ * Whether the samples of @evsel can carry a resolved data type: the
+ * consumer needs the data address of the access (the instance identity,
+ * without which every instance of a type collapses into the same one) and
+ * the CPU the access happened on (a core does not invalidate itself, so it
+ * is the cross CPU accesses that make a pair of them false sharing).
+ */
+static bool data_type_evsel(struct ctf_writer *cw, struct evsel *evsel)
+{
+	u64 type = evsel->core.attr.sample_type;
+
+	if (!cw->data_type || !(type & PERF_SAMPLE_ADDR))
+		return false;
+
+	if (!(type & PERF_SAMPLE_CPU)) {
+		pr_warning("'%s' samples no CPU: the data type records need the CPU the access happened on, re-record with --sample-cpu\n",
+			   evsel__name(evsel));
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * The id of @dso in the perf_dso_info table, assigning one the first time
+ * the DSO shows up and reporting it in @new_dso, so that the caller can
+ * publish it before the sample that references it.  Ids start at one: the
+ * samples no type was resolved for carry zero, and a consumer that finds no
+ * perf_dso_info event for an id falls back to an unknown, unverified DSO.
+ */
+static int dso_info_id(struct convert *c, struct dso *dso, struct dso **new_dso)
+{
+	size_t i;
+
+	*new_dso = NULL;
+
+	for (i = 0; i < c->dt_nr_dsos; i++) {
+		if (c->dt_dsos[i] == dso)
+			return i + 1;
+	}
+
+	if ((c->dt_nr_dsos % 16) == 0) {
+		struct dso **dsos = realloc(c->dt_dsos,
+					    (c->dt_nr_dsos + 16) * sizeof(*dsos));
+		if (dsos == NULL) {
+			pr_err("Failed to grow the DSO table.\n");
+			return -1;
+		}
+		c->dt_dsos = dsos;
+	}
+
+	c->dt_dsos[c->dt_nr_dsos] = dso;
+	*new_dso = dso;
+
+	return ++c->dt_nr_dsos;
+}
+
+/*
+ * The perf_dso_info side event: one per DSO a data type was resolved in,
+ * carrying the identity the consumer needs to find the DWARF the type came
+ * from and to check that it is analyzing the binary that was profiled --
+ * the same (dso, build_id) pair the JSON export of 'perf report -s type'
+ * carries.  A name per sample would bloat the stream, so the perf_sample
+ * records carry the id this event publishes instead.
+ */
+static int add_dso_info_event(struct ctf_writer *cw)
+{
+	struct bt_ctf_event_class *event_class;
+	int ret = -1;
+
+	pr("Adding dso_info event\n");
+	event_class = bt_ctf_event_class_create("perf_dso_info");
+	if (!event_class)
+		return -1;
+
+	if (bt_ctf_event_class_add_field(event_class, cw->data.u64, "id") ||
+	    bt_ctf_event_class_add_field(event_class, cw->data.string, "long_name") ||
+	    bt_ctf_event_class_add_field(event_class, cw->data.string, "build_id")) {
+		pr_err("Failed to add the 'perf_dso_info' fields.\n");
+		goto err;
+	}
+
+	ret = bt_ctf_stream_class_add_event_class(cw->stream_class, event_class);
+	if (ret) {
+		pr("Failed to add event class 'dso_info' into stream.\n");
+		goto err;
+	}
+
+	cw->dso_info_class = event_class;
+	bt_ctf_event_class_put(event_class);
+	return 0;
+
+err:
+	bt_ctf_event_class_put(event_class);
+	return ret;
+}
+
+/* An empty build_id tells the consumer that the DSO has none. */
+static int emit_dso_info(struct ctf_writer *cw, struct ctf_stream *cs,
+			 struct dso *dso, u64 id, u64 time)
+{
+	char sbuild_id[SBUILD_ID_SIZE] = "";
+	struct bt_ctf_event *event;
+	int ret;
+
+	event = bt_ctf_event_create(cw->dso_info_class);
+	if (!event) {
+		pr_err("Failed to create a perf_dso_info event\n");
+		return -1;
+	}
+
+	if (dso__has_build_id(dso))
+		build_id__snprintf(dso__bid(dso), sbuild_id, sizeof(sbuild_id));
+
+	bt_ctf_clock_set_time(cw->clock, time);
+
+	ret = value_set_u64(cw, event, "id", id);
+	if (ret == 0)
+		ret = value_set_string(cw, event, "long_name", dso__long_name(dso));
+	if (ret == 0)
+		ret = value_set_string(cw, event, "build_id", sbuild_id);
+	if (ret == 0) {
+		cs->count++;
+		bt_ctf_stream_append_event(cs->stream, event);
+	}
+
+	bt_ctf_event_put(event);
+	return ret;
+}
+
+/*
+ * Resolve the data type @sample accessed and set the perf_sample_* fields
+ * with it.  A sample whose type could not be resolved gets an empty type
+ * name and no DSO: the trace stays a faithful conversion of perf.data
+ * instead of dropping the sample, and the consumer skips the empty ones.
+ * The stack operation and stack canary pseudo types are skipped too, they
+ * are not accesses to an instance of a type.
+ *
+ * Returns 0 on success, -1 on error, and the DSO that got a new id in
+ * @new_dso (with that id in @new_dso_id) so the caller can publish it right
+ * before the sample that references it.
+ */
+static int add_data_type_values(struct convert *c, struct bt_ctf_event *event,
+				struct evsel *evsel, struct perf_sample *sample,
+				struct machine *machine, struct dso **new_dso,
+				u64 *new_dso_id)
+{
+	struct ctf_writer *cw = &c->writer;
+	struct annotated_data_type *data_type = NULL;
+	struct addr_location al;
+	const char *type_name = "";
+	int offset = 0, dso_id = 0, ret = 0;
+	bool is_write = false;
+
+	*new_dso = NULL;
+	*new_dso_id = 0;
+
+	addr_location__init(&al);
+
+	if (machine__resolve(machine, &al, sample) < 0)
+		pr_debug("data type: cannot resolve the sample at %#" PRIx64 "\n",
+			 sample->ip);
+	else if (al.map && al.sym) {
+		/*
+		 * The map, symbol and thread references belong to @al, which
+		 * outlives the resolution: nothing in it takes or drops a
+		 * reference of its own.
+		 */
+		struct map_symbol ms = {
+			.thread	= al.thread,
+			.map	= al.map,
+			.sym	= al.sym,
+		};
+
+		data_type = annotate_resolve_data_type(&ms, al.addr, al.thread,
+						       al.cpumode, evsel,
+						       &offset, &is_write,
+						       sample->addr);
+	}
+
+	if (data_type == &stackop_type || data_type == &canary_type)
+		data_type = NULL;
+
+	if (data_type) {
+		/*
+		 * The direction of the access: a memory sample carries what
+		 * the hardware saw in data_src, which is the only reliable
+		 * source on the PMUs with a single load/store event (AMD
+		 * IBS); the role the operand parser assigned to the memory
+		 * operand is the fallback for the samples that say nothing
+		 * about it.
+		 */
+		if (evsel->core.attr.sample_type & PERF_SAMPLE_DATA_SRC) {
+			union perf_mem_data_src data_src = {
+				.val = sample->data_src,
+			};
+
+			if (data_src.mem_op & PERF_MEM_OP_STORE)
+				is_write = true;
+			else if (data_src.mem_op & PERF_MEM_OP_LOAD)
+				is_write = false;
+		}
+
+		type_name = data_type->self.type_name;
+		dso_id = dso_info_id(c, map__dso(al.map), new_dso);
+		if (dso_id < 0) {
+			ret = -1;
+			goto out;
+		}
+		*new_dso_id = dso_id;
+		c->dt_resolved++;
+	} else {
+		offset = 0;
+		is_write = false;
+	}
+
+	/*
+	 * With a fixed sampling period the field is in the event class but
+	 * add_generic_values() left it alone, as the sample does not carry
+	 * it: the period comes from the attr there.
+	 */
+	if (!(evsel->core.attr.sample_type & PERF_SAMPLE_PERIOD)) {
+		ret = value_set_u64(cw, event, "perf_period", sample->period);
+		if (ret)
+			goto out;
+	}
+
+	ret = value_set_string(cw, event, "perf_sample_type", type_name);
+	if (ret == 0)
+		ret = value_set_u64(cw, event, "perf_sample_type_offset", offset);
+	if (ret == 0)
+		ret = value_set_u64(cw, event, "perf_sample_is_write", is_write ? 1 : 0);
+	if (ret == 0)
+		ret = value_set_u64(cw, event, "perf_sample_cpu", sample->cpu);
+	if (ret == 0)
+		ret = value_set_u64_hex(cw, event, "perf_sample_addr", sample->addr);
+	if (ret == 0)
+		ret = value_set_u64(cw, event, "perf_sample_dso_id", dso_id);
+
+out:
+	addr_location__exit(&al);
+	return ret;
+}
+
 static int process_sample_event(const struct perf_tool *tool,
 				union perf_event *_event,
 				struct perf_sample *sample,
-				struct machine *machine __maybe_unused)
+				struct machine *machine)
 {
 	struct convert *c = container_of(tool, struct convert, tool);
 	struct evsel *evsel = sample->evsel;
@@ -811,6 +1082,8 @@ static int process_sample_event(const struct perf_tool *tool,
 	struct ctf_stream *cs;
 	struct bt_ctf_event_class *event_class;
 	struct bt_ctf_event *event;
+	struct dso *new_dso = NULL;
+	u64 new_dso_id = 0;
 	int ret;
 	unsigned long type = evsel->core.attr.sample_type;
 
@@ -842,6 +1115,13 @@ static int process_sample_event(const struct perf_tool *tool,
 	if (ret)
 		return -1;
 
+	if (priv->data_type) {
+		ret = add_data_type_values(c, event, evsel, sample, machine,
+					   &new_dso, &new_dso_id);
+		if (ret)
+			return -1;
+	}
+
 	if (evsel->core.attr.type == PERF_TYPE_TRACEPOINT) {
 		ret = add_tracepoint_values(cw, event_class, event,
 					    evsel, sample);
@@ -866,6 +1146,17 @@ static int process_sample_event(const struct perf_tool *tool,
 	if (cs) {
 		if (is_flush_needed(cs))
 			ctf_stream__flush(cs);
+
+		/*
+		 * The identity of the DSO this sample's type was resolved in
+		 * goes out right before the sample referencing it, into the
+		 * same stream, so that a consumer sees the side event before
+		 * the id it carries.
+		 */
+		if (new_dso && emit_dso_info(cw, cs, new_dso, new_dso_id,
+					     sample->time))
+			pr_warning("Failed to write the perf_dso_info event for %s\n",
+				   dso__long_name(new_dso));
 
 		cs->count++;
 		bt_ctf_stream_append_event(cs->stream, event);
@@ -1108,7 +1399,8 @@ static int add_bpf_output_types(struct ctf_writer *cw,
 }
 
 static int add_generic_types(struct ctf_writer *cw, struct evsel *evsel,
-			     struct bt_ctf_event_class *event_class)
+			     struct bt_ctf_event_class *event_class,
+			     bool data_type)
 {
 	u64 type = evsel->core.attr.sample_type;
 
@@ -1149,7 +1441,14 @@ static int add_generic_types(struct ctf_writer *cw, struct evsel *evsel,
 	if (type & PERF_SAMPLE_STREAM_ID)
 		ADD_FIELD(event_class, cw->data.u64, "perf_stream_id");
 
-	if (type & PERF_SAMPLE_PERIOD)
+	/*
+	 * A fixed sampling period ('perf record -c') is not carried by each
+	 * sample, perf_evsel__parse_sample() takes it from the attr instead.
+	 * The data type records want it anyway, so that the consumer summing
+	 * the per sample periods gets the totals the aggregate histograms of
+	 * 'perf report -s type' carry.
+	 */
+	if ((type & PERF_SAMPLE_PERIOD) || data_type)
 		ADD_FIELD(event_class, cw->data.u64, "perf_period");
 
 	if (type & PERF_SAMPLE_WEIGHT)
@@ -1160,6 +1459,24 @@ static int add_generic_types(struct ctf_writer *cw, struct evsel *evsel,
 
 	if (type & PERF_SAMPLE_TRANSACTION)
 		ADD_FIELD(event_class, cw->data.u64, "perf_transaction");
+
+	if (data_type) {
+		/*
+		 * The data type this memory sample accessed, resolved from
+		 * the instruction's debug info: one record per sample, so
+		 * that a consumer gets the per access timestamp, CPU, data
+		 * address and direction that the collapsed histograms of
+		 * 'perf report -s type' cannot carry.  pahole reads these to
+		 * tell true from false sharing and to suggest cacheline
+		 * groups, see its --perf-data-type option.
+		 */
+		ADD_FIELD(event_class, cw->data.string, "perf_sample_type");
+		ADD_FIELD(event_class, cw->data.u64, "perf_sample_type_offset");
+		ADD_FIELD(event_class, cw->data.u64, "perf_sample_is_write");
+		ADD_FIELD(event_class, cw->data.u64, "perf_sample_cpu");
+		ADD_FIELD(event_class, cw->data.u64_hex, "perf_sample_addr");
+		ADD_FIELD(event_class, cw->data.u64, "perf_sample_dso_id");
+	}
 
 	if (type & PERF_SAMPLE_CALLCHAIN) {
 		ADD_FIELD(event_class, cw->data.u32, "perf_callchain_size");
@@ -1178,6 +1495,7 @@ static int add_event(struct ctf_writer *cw, struct evsel *evsel)
 	struct bt_ctf_event_class *event_class;
 	struct evsel_priv *priv;
 	const char *name = evsel__name(evsel);
+	bool data_type = data_type_evsel(cw, evsel);
 	int ret;
 
 	if (evsel->priv) {
@@ -1190,7 +1508,7 @@ static int add_event(struct ctf_writer *cw, struct evsel *evsel)
 	if (!event_class)
 		return -1;
 
-	ret = add_generic_types(cw, evsel, event_class);
+	ret = add_generic_types(cw, evsel, event_class, data_type);
 	if (ret)
 		goto err;
 
@@ -1217,6 +1535,7 @@ static int add_event(struct ctf_writer *cw, struct evsel *evsel)
 		goto err;
 
 	priv->event_class = event_class;
+	priv->data_type   = data_type;
 	evsel->priv       = priv;
 	return 0;
 
@@ -1747,11 +2066,42 @@ int bt_convert__perf2ctf(const char *input, const char *path,
 	if (err)
 		return err;
 
+	if (opts->data_type) {
+#ifndef HAVE_LIBDW_SUPPORT
+		pr_err("Error: Data type profiling is disabled due to missing DWARF support\n");
+		return -EINVAL;
+#endif
+		/*
+		 * Resolving the data type of a sample disassembles the
+		 * instruction that accessed memory, so the annotation
+		 * machinery is set up the way 'perf report -s type' does it.
+		 * The source lines are of no use here, only the operands.
+		 */
+		annotation_options__init();
+		annotate_opts.annotate_src = false;
+	}
+
 	err = -1;
 	/* perf.data session */
 	session = perf_session__new(&data, &c.tool);
 	if (IS_ERR(session))
 		return PTR_ERR(session);
+
+	if (opts->data_type) {
+		/*
+		 * Reserving the per symbol annotation space has to happen
+		 * before symbol__init(), which freezes the priv size, and
+		 * the disassemblers have to be picked before the first
+		 * symbol is annotated.
+		 */
+		if (symbol__annotation_init() < 0)
+			goto free_session;
+
+		annotation_config__init();
+
+		if (symbol__init(perf_session__env(session)) < 0)
+			goto free_session;
+	}
 
 	if (opts->time_str) {
 		err = perf_time__parse_for_ranges(opts->time_str, session,
@@ -1765,6 +2115,9 @@ int bt_convert__perf2ctf(const char *input, const char *path,
 	/* CTF writer */
 	if (ctf_writer__init(cw, path, session, opts->tod))
 		goto free_session;
+
+	/* Before setup_events(): it is what decides the event class fields */
+	cw->data_type = opts->data_type;
 
 	if (c.queue_size) {
 		ordered_events__set_alloc_size(&session->ordered_events,
@@ -1783,6 +2136,9 @@ int bt_convert__perf2ctf(const char *input, const char *path,
 		goto free_writer;
 
 	if (opts->all && setup_non_sample_events(cw, session))
+		goto free_writer;
+
+	if (cw->data_type && add_dso_info_event(cw))
 		goto free_writer;
 
 	if (setup_streams(cw, session))
@@ -1811,8 +2167,23 @@ int bt_convert__perf2ctf(const char *input, const char *path,
 			c.skipped);
 	}
 
+	if (cw->data_type) {
+		fprintf(stderr, "[ perf data convert: Resolved the data type of %" PRIu64 " samples in %zu DSOs ]\n",
+			c.dt_resolved, c.dt_nr_dsos);
+
+		c.dt_bad_addr = ann_data_stat.bad_addr;
+		if (c.dt_bad_addr)
+			fprintf(stderr, "[ perf data convert: Skipped %" PRIu64 " samples whose data address is outside the type the recorded IP resolves to, see perf-data(1) ]\n",
+				c.dt_bad_addr);
+
+		if (!c.dt_resolved)
+			pr_warning("No data type was resolved: the samples need the data address ('perf mem record', or 'perf record -d --sample-cpu') and the binaries need debug info\n");
+	}
+
 	if (c.ptime_range)
 		zfree(&c.ptime_range);
+
+	zfree(&c.dt_dsos);
 
 	cleanup_events(session);
 	perf_session__delete(session);
@@ -1825,6 +2196,8 @@ free_writer:
 free_session:
 	if (c.ptime_range)
 		zfree(&c.ptime_range);
+
+	zfree(&c.dt_dsos);
 
 	perf_session__delete(session);
 	pr_err("Error during conversion setup.\n");

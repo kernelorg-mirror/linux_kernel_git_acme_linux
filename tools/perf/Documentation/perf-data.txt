@@ -33,6 +33,41 @@ OPTIONS for 'convert'
 --tod::
 	Convert time to wall clock time.
 
+--data-type::
+	Resolve the data type each memory sample accessed and add it to the
+	CTF output, as these fields of the sample events: perf_sample_type
+	(the type name, empty when it could not be resolved),
+	perf_sample_type_offset (the offset of the access within that type),
+	perf_sample_is_write, perf_sample_cpu, perf_sample_addr (the data
+	address, which identifies the instance that was accessed) and
+	perf_sample_dso_id.  The DSO a type was resolved in is published
+	once, as a perf_dso_info event carrying its id, long name and build
+	id, which the sample records then reference by id.
+
+	It needs the debug info of the profiled binaries, and samples that
+	carry the data address and the CPU they were taken on, as recorded
+	by 'perf mem record' or 'perf record -d --sample-cpu'.  Only applies
+	to --to-ctf.
+
+	Samples whose data address falls outside the memory range of the
+	variable that the recorded IP resolves to are not resolved: the
+	recorded IP did not perform the access, which happens when the PEBS
+	IP fixup fails, typically for a store sampled while the thread was
+	running an interrupt handler -- the recorded IP is the userspace
+	instruction that was interrupted while the access went to the
+	kernel stack.  These samples are left without the perf_sample_*
+	data type fields and their count is reported at the end of the
+	conversion; the same counter shows as 'bad_addr' in the data type
+	stats, which 'perf report --type-stat' prints for the JSON
+	producer and 'perf annotate --type-stat' for the annotation view.
+
+	One record per access is what a consumer needs to tell true from
+	false sharing and to suggest which members belong in the same
+	cacheline group, which the aggregate histograms exported by
+	'perf report -s type --data-type-json' cannot tell: they lose the
+	per sample timestamp, CPU and data address.  See the --perf-data-type
+	option of pahole for such a consumer.
+
 -i::
 	Specify input perf data file path.
 
