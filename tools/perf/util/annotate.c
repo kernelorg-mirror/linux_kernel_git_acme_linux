@@ -3324,6 +3324,58 @@ retry:
  * from re-resolving and accounting the (by then accumulated) samples
  * twice.
  */
+/**
+ * annotate_sample_is_store - the direction of a memory sample's access
+ * @evsel: event the sample was recorded with
+ * @data_src: the data source the hardware recorded, zero when it says
+ * nothing about it
+ * @parser_is_store: the direction the operand parser assigned, the
+ * fallback
+ *
+ * The event is the most authoritative source when the PMU has separate
+ * load and store memory events, since 'perf mem record' asks for the
+ * mem-loads and mem-stores events: a sample of the latter is a store,
+ * period.  This matters because the E-core store events on hybrid Intel
+ * parts are routed to the PEBS latency data path, which builds the data
+ * source from a load-oriented data source table and reports LOAD for
+ * stores; trusting it counted stores as loads in both deliverables,
+ * which is what pahole's producer pair test caught with its fixture
+ * expectation.
+ *
+ * On PMUs with a single load/store event (AMD IBS, mem-ldst) the event
+ * name matches neither, and the data source the hardware recorded is
+ * the only sample-side evidence: it beats the role the operand parser
+ * assigned, because the parser follows the textual convention of each
+ * architecture and can misclassify instructions the hardware
+ * classified correctly, and the aggregate JSON and the per-sample CTF
+ * deliverables must classify the same sample the same way.  When the
+ * sample carries no data source, the parser's role is the fallback.
+ */
+bool annotate_sample_is_store(struct evsel *evsel, u64 data_src,
+			      bool parser_is_store)
+{
+	const char *name = evsel__name(evsel);
+
+	if (strstr(name, "mem-stores"))
+		return true;
+
+	if (strstr(name, "mem-loads"))
+		return false;
+
+	if (data_src) {
+		union perf_mem_data_src src = {
+			.val = data_src,
+		};
+
+		if (src.mem_op & PERF_MEM_OP_STORE)
+			return true;
+		if (src.mem_op & PERF_MEM_OP_LOAD)
+			return false;
+	}
+
+	return parser_is_store;
+}
+
 void hist_entry__setup_data_type(struct hist_entry *he)
 {
 	struct evsel *evsel = hists_to_evsel(he->hists);
@@ -3353,28 +3405,14 @@ void hist_entry__setup_data_type(struct hist_entry *he)
 
 	if (symbol_conf.annotate_data_sample &&
 	    mem_type != &stackop_type && mem_type != &canary_type) {
-		/*
-		 * The direction the hardware saw wins over the parser's
-		 * when it says something definitive: on PMUs with a single
-		 * load/store event (AMD IBS) the parser can misread
-		 * instructions the hardware classified correctly, and the
-		 * aggregate JSON and the per-sample CTF deliverables must
-		 * classify the same sample the same way.
-		 */
-		if (he->mem_info) {
-			u8 hw_op = mem_info__data_src(he->mem_info)->mem_op;
-
-			if (hw_op & PERF_MEM_OP_STORE)
-				is_store = true;
-			else if (hw_op & PERF_MEM_OP_LOAD)
-				is_store = false;
-		}
-
 		annotated_data_type__update_samples(mem_type, evsel,
 						    he->mem_type_off,
 						    he->stat.nr_events,
 						    he->stat.period,
-						    is_store);
+						    annotate_sample_is_store(evsel,
+									     he->mem_info ?
+									     mem_info__data_src(he->mem_info)->val : 0,
+									     is_store));
 	}
 }
 
@@ -3432,27 +3470,20 @@ void annotated_data_type__account_folded_sample(struct hist_entry *he,
 						struct hist_entry *entry)
 {
 	struct evsel *evsel = hists_to_evsel(he->hists);
-	bool is_store = he->mem_is_store;
 
 	if (!symbol_conf.annotate_data_sample || he->mem_type == NULL ||
 	    he->mem_type == &unknown_type || he->mem_type == &stackop_type ||
 	    he->mem_type == &canary_type)
 		return;
 
-	if (entry->mem_info) {
-		u8 hw_op = mem_info__data_src(entry->mem_info)->mem_op;
-
-		if (hw_op & PERF_MEM_OP_STORE)
-			is_store = true;
-		else if (hw_op & PERF_MEM_OP_LOAD)
-			is_store = false;
-	}
-
 	annotated_data_type__update_samples(he->mem_type, evsel,
 					    he->mem_type_off,
 					    entry->stat.nr_events,
 					    entry->stat.period,
-					    is_store);
+					    annotate_sample_is_store(evsel,
+								     entry->mem_info ?
+								     mem_info__data_src(entry->mem_info)->val : 0,
+								     he->mem_is_store));
 }
 
 /* Basic block traversal (BFS) data structure */

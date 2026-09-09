@@ -1011,23 +1011,17 @@ static int add_data_type_values(struct convert *c, struct bt_ctf_event *event,
 
 	if (data_type) {
 		/*
-		 * The direction of the access: a memory sample carries what
-		 * the hardware saw in data_src, which is the only reliable
-		 * source on the PMUs with a single load/store event (AMD
-		 * IBS); the role the operand parser assigned to the memory
-		 * operand is the fallback for the samples that say nothing
-		 * about it.
+		 * The direction of the access: the event when the PMU
+		 * separates loads and stores, then what the hardware saw in
+		 * data_src, which is the only reliable source on the PMUs
+		 * with a single load/store event (AMD IBS); the role the
+		 * operand parser assigned to the memory operand is the
+		 * fallback for the samples that say nothing about it.
 		 */
-		if (evsel->core.attr.sample_type & PERF_SAMPLE_DATA_SRC) {
-			union perf_mem_data_src data_src = {
-				.val = sample->data_src,
-			};
-
-			if (data_src.mem_op & PERF_MEM_OP_STORE)
-				is_write = true;
-			else if (data_src.mem_op & PERF_MEM_OP_LOAD)
-				is_write = false;
-		}
+		is_write = annotate_sample_is_store(evsel,
+						    evsel->core.attr.sample_type & PERF_SAMPLE_DATA_SRC ?
+							    sample->data_src : 0,
+						    is_write);
 
 		type_name = data_type->self.type_name;
 		dso_id = dso_info_id(c, map__dso(al.map), new_dso);

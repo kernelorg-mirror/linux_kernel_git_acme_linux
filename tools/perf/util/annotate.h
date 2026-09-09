@@ -606,6 +606,15 @@ void hist_entry__setup_data_type(struct hist_entry *he);
 bool annotated_data_type__check_folded_sample(struct hist_entry *he, u64 addr);
 
 /*
+ * The direction of a memory sample's access, for the per-direction
+ * histograms: the event when the PMU separates loads and stores, then
+ * what the hardware recorded in @data_src, then the role the operand
+ * parser assigned, which @parser_is_store carries.
+ */
+bool annotate_sample_is_store(struct evsel *evsel, u64 data_src,
+			      bool parser_is_store);
+
+/*
  * Account a sample folding into a hist entry into the entry's data type
  * histogram, with its own direction; the sample that created the entry
  * is accounted by hist_entry__setup_data_type().
