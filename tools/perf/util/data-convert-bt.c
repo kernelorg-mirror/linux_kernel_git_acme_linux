@@ -1003,7 +1003,7 @@ static int add_data_type_values(struct convert *c, struct bt_ctf_event *event,
 		data_type = annotate_resolve_data_type(&ms, al.addr, al.thread,
 						       al.cpumode, evsel,
 						       &offset, &is_write,
-						       sample->addr);
+						       sample->addr, NULL);
 	}
 
 	if (data_type == &stackop_type || data_type == &canary_type)
@@ -2173,7 +2173,7 @@ int bt_convert__perf2ctf(const char *input, const char *path,
 
 		c.dt_bad_addr = ann_data_stat.bad_addr;
 		if (c.dt_bad_addr)
-			fprintf(stderr, "[ perf data convert: Skipped %" PRIu64 " samples whose data address is outside the type the recorded IP resolves to, see perf-data(1) ]\n",
+			fprintf(stderr, "[ perf data convert: Skipped %" PRIu64 " samples whose data address is not the one the recorded IP's PC-relative operand accesses, see perf-data(1) ]\n",
 				c.dt_bad_addr);
 
 		if (!c.dt_resolved)

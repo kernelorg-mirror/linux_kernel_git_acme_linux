@@ -88,6 +88,14 @@ struct annotated_data_type canary_type = {
 	},
 };
 
+/* Placeholder for the entries that got no data type resolved */
+struct annotated_data_type unknown_type = {
+	.self = {
+		.type_name = (char *)"(unknown)",
+		.children = LIST_HEAD_INIT(unknown_type.self.children),
+	},
+};
+
 #define NO_TYPE ((struct annotated_data_type *)-1UL)
 
 /* symbol histogram: key = offset << 16 | evsel->core.idx */
@@ -786,7 +794,8 @@ static struct annotated_data_type *
 annotate_get_data_type(struct map_symbol *ms, struct thread *thread,
 		       u8 cpumode, struct debuginfo *dbg,
 		       struct disasm_line *dl, const struct arch *arch,
-		       int *type_offset, bool *is_store, u64 addr);
+		       int *type_offset, bool *is_store, u64 addr,
+		       u64 *mem_var_addr);
 
 static bool needs_type_info(struct annotated_data_type *data_type)
 {
@@ -936,7 +945,8 @@ annotation_line__print(struct annotation_line *al, struct annotation_print_data 
 							   apd->dbg, dl,
 							   apd->arch, &offset,
 							   /*is_store=*/NULL,
-							   /*addr=*/0);
+							   /*addr=*/0,
+							   /*mem_var_addr=*/NULL);
 			if (needs_type_info(data_type)) {
 				char buf[4096];
 
@@ -2099,7 +2109,8 @@ static int disasm_line__snprint_type_info(struct disasm_line *dl,
 						   apd->he->cpumode, apd->dbg,
 						   dl, apd->arch, &offset,
 						   /*is_store=*/NULL,
-						   /*addr=*/0);
+						   /*addr=*/0,
+						   /*mem_var_addr=*/NULL);
 
 	if (apd->type_hash && entry == NULL) {
 		entry = malloc(sizeof(*entry));
@@ -2994,6 +3005,11 @@ static struct debuginfo *debuginfo_cache__get(struct map_symbol *ms)
  * @arch: architecture @dl was disassembled for
  * @type_offset: out, offset of the access within the type
  * @is_store: out, whether the memory operand is written (may be NULL)
+ * @mem_var_addr: out, the address of the PC-relative operand in the
+ * memory address space, i.e. what the data address of a sample has to
+ * be tested against (may be NULL); not written for the other
+ * addressing modes, where the effective address depends on the
+ * register contents at sample time
  *
  * The hist_entry-free core of the data type resolution: it takes the
  * memory operand of @dl and looks the variable it addresses up in @dbg.
@@ -3010,7 +3026,8 @@ static struct annotated_data_type *
 annotate_get_data_type(struct map_symbol *ms, struct thread *thread,
 		       u8 cpumode, struct debuginfo *dbg,
 		       struct disasm_line *dl, const struct arch *arch,
-		       int *type_offset, bool *is_store, u64 addr)
+		       int *type_offset, bool *is_store, u64 addr,
+		       u64 *mem_var_addr)
 {
 	struct annotated_insn_loc loc;
 	struct annotated_op_loc *op_loc;
@@ -3094,19 +3111,37 @@ annotate_get_data_type(struct map_symbol *ms, struct thread *thread,
 		 * operand computes: disp(%rip) has no runtime component, so
 		 * the hardware can produce exactly one address for it, and
 		 * the test is equality, not a range inside the resolved
-		 * variable.  The two sides are in different address spaces:
-		 * the operand address is in the objdump address space, what
-		 * the DWARF lookup needs, while the data address of the
-		 * sample is in the memory address space, so
-		 * map__objdump_2mem() is what converts it, being the inverse
-		 * of the map__rip_2objdump() that annotate_calc_pcrel()
-		 * ended with.
+		 * variable: a mis-fixed-up data address that lands on
+		 * another member of the same variable would still attribute
+		 * the access to a member the recorded instruction never
+		 * touched.
+		 *
+		 * The two sides are in different address spaces: the operand
+		 * address is in the objdump address space, what the DWARF
+		 * lookup needs, while the data address of the sample is in
+		 * the memory address space, so map__objdump_2mem() is what
+		 * converts it, being the inverse of the map__rip_2objdump()
+		 * that annotate_calc_pcrel() ended with.  Operands whose
+		 * effective address depends on registers at sample time
+		 * have nothing to test against and are left as is.
 		 */
-		if (mem_type != NULL && pcrel && addr != 0) {
+		if (mem_type != NULL && pcrel) {
 			u64 mem_addr = map__objdump_2mem(ms->map, dloc.var_addr);
 
-			if (addr != mem_addr) {
+			/*
+			 * Reported back for the samples folding into the
+			 * resolution, tested against the same operand
+			 * address by
+			 * annotated_data_type__check_folded_sample(), even
+			 * when the sample that established it gets dropped
+			 * by the test below.
+			 */
+			if (mem_var_addr != NULL)
+				*mem_var_addr = mem_addr;
+
+			if (addr != 0 && addr != mem_addr) {
 				ann_data_stat.bad_addr++;
+				ann_data_stat.rejected_addr++;
 				istat->bad++;
 				return NO_TYPE;
 			}
@@ -3169,13 +3204,17 @@ annotate_get_data_type(struct map_symbol *ms, struct thread *thread,
  * @addr is the data address of the sample the resolution is for, zero
  * when there is none; it is what keeps samples recorded with an IP that
  * did not perform the access from being attributed to the variable the
- * recorded IP resolves to.
+ * recorded IP resolves to.  @mem_var_addr reports back the address of
+ * the PC-relative operand in the memory address space, the one the
+ * sample's data address is tested against, so that the caller can apply
+ * the same test to the samples it folds into the resolution (may be
+ * NULL).
  */
 struct annotated_data_type *
 annotate_resolve_data_type(struct map_symbol *ms, u64 ip,
 			   struct thread *thread, u8 cpumode,
 			   struct evsel *evsel, int *type_offset,
-			   bool *is_store, u64 addr)
+			   bool *is_store, u64 addr, u64 *mem_var_addr)
 {
 	const struct arch *arch;
 	struct debuginfo *dbg;
@@ -3220,11 +3259,26 @@ annotate_resolve_data_type(struct map_symbol *ms, u64 ip,
 
 retry:
 	mem_type = annotate_get_data_type(ms, thread, cpumode, dbg, dl, arch,
-					  type_offset, &store, addr);
+					  type_offset, &store, addr,
+					  mem_var_addr);
+	if (mem_type == NO_TYPE) {
+		/*
+		 * The instruction's operand was resolved and then dropped
+		 * by the data address test: the recorded IP did not
+		 * perform the access.  Nothing to report back, the caller
+		 * treats NULL as no type; @is_store stays alone, the
+		 * direction of a resolution that was dropped is
+		 * meaningless.  No fused instruction retry either: the
+		 * recorded instruction is the one that was interrupted,
+		 * not the one that made the access.
+		 */
+		return NULL;
+	}
+
 	if (mem_type) {
 		if (is_store)
 			*is_store = store;
-		return mem_type == NO_TYPE ? NULL : mem_type;
+		return mem_type;
 	}
 
 	/*
@@ -3252,28 +3306,52 @@ retry:
 }
 
 /**
- * hist_entry__get_data_type - find data type for given hist entry
+ * hist_entry__setup_data_type - find and set the data type of a hist entry
  * @he: hist entry
  *
- * Resolves the type the way annotate_resolve_data_type() does and accounts
- * the samples of @he into its histograms, which is what the data type
- * profiling views ('perf report -s type', 'perf annotate --data-type') and
- * their JSON export read.  The pseudo types for stack operations and for
- * the stack canary carry no histogram, so they are not accounted.
+ * Resolves the type the way annotate_resolve_data_type() does and assigns
+ * it to @he, accounting the samples of @he into its histograms, which is
+ * what the data type profiling views ('perf report -s type', 'perf
+ * annotate --data-type') and their JSON export read.  The pseudo types
+ * for stack operations and for the stack canary carry no histogram, so
+ * they are not accounted.
+ *
+ * The address of the PC-relative operand, in the memory address space,
+ * is stashed in @he, so that the samples folding into @he can be tested
+ * against the same operand address the sample that established the
+ * resolution was.  Entries with no type resolved get the unknown_type
+ * placeholder, which also keeps a later hist_entry__setup_data_type()
+ * from re-resolving and accounting the (by then accumulated) samples
+ * twice.
  */
-struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
+void hist_entry__setup_data_type(struct hist_entry *he)
 {
 	struct evsel *evsel = hists_to_evsel(he->hists);
 	struct annotated_data_type *mem_type;
 	bool is_store = false;
+	u64 mem_var_addr = 0;
 
 	mem_type = annotate_resolve_data_type(&he->ms, he->ip, he->thread,
 					      he->cpumode, evsel,
 					      &he->mem_type_off, &is_store,
 					      he->mem_info ?
-						mem_info__daddr(he->mem_info)->addr : 0);
+						mem_info__daddr(he->mem_info)->addr : 0,
+					      &mem_var_addr);
 
-	if (symbol_conf.annotate_data_sample && mem_type &&
+	if (mem_var_addr)
+		he->mem_var_addr = mem_var_addr;
+
+	if (mem_type == NULL) {
+		he->mem_type = &unknown_type;
+		he->mem_type_off = 0;
+		return;
+	}
+
+	he->mem_type = mem_type;
+	/* the instruction's direction, fallback for the folded samples */
+	he->mem_is_store = is_store;
+
+	if (symbol_conf.annotate_data_sample &&
 	    mem_type != &stackop_type && mem_type != &canary_type) {
 		/*
 		 * The direction the hardware saw wins over the parser's
@@ -3298,8 +3376,83 @@ struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he)
 						    he->stat.period,
 						    is_store);
 	}
+}
 
-	return mem_type;
+/**
+ * annotated_data_type__check_folded_sample - test a sample folding into a
+ * hist entry against the PC-relative operand its type was resolved from
+ * @he: hist entry, with the type already set up
+ * @addr: data address of the sample folding into @he
+ *
+ * A sample folding into a hist entry whose type was resolved through a
+ * PC-relative variable must have the data address the instruction's
+ * operand computes, exactly, just like the sample that established the
+ * resolution had to (annotate_get_data_type()): the operand is
+ * disp(%rip), there is exactly one address the hardware can produce for
+ * it, so all the samples folding into the entry, being the same
+ * instruction, are the same access.  When @addr differs, the recorded
+ * IP did not perform the access (a failed PEBS IP fixup, or the
+ * static text diverging from the runtime text at an
+ * alternatives-patched site), and the entry's resolution must not
+ * absorb it.
+ *
+ * The test can't be applied when @he has no operand address stashed
+ * (the resolution didn't go through a PC-relative operand, the per-cpu
+ * one included), or when the folding sample carries no data address:
+ * there is nothing to compare against, and the sample rides the entry's
+ * resolution as before this test existed.
+ *
+ * Return: true when the sample belongs to the entry and can be accounted
+ * into it, false when it must be dropped.
+ */
+bool annotated_data_type__check_folded_sample(struct hist_entry *he, u64 addr)
+{
+	if (he->mem_var_addr == 0 || addr == 0 || addr == he->mem_var_addr)
+		return true;
+
+	ann_data_stat.bad_addr++;
+	return false;
+}
+
+/**
+ * annotated_data_type__account_folded_sample - account a sample folding
+ * into a hist entry into the entry's data type histogram
+ * @he: hist entry, with the type already set up
+ * @entry: the template of the sample folding into @he
+ *
+ * The histogram accounting is per sample: the sample that created the
+ * entry is accounted by hist_entry__setup_data_type(), the ones folding
+ * into it by this function, each with its own direction.  The data type
+ * and offset are the entry's, i.e. the ones the recorded IP resolves
+ * to; the direction comes from the folded sample's own data_src when it
+ * says something definitive, falling back to the entry's instruction
+ * direction.
+ */
+void annotated_data_type__account_folded_sample(struct hist_entry *he,
+						struct hist_entry *entry)
+{
+	struct evsel *evsel = hists_to_evsel(he->hists);
+	bool is_store = he->mem_is_store;
+
+	if (!symbol_conf.annotate_data_sample || he->mem_type == NULL ||
+	    he->mem_type == &unknown_type || he->mem_type == &stackop_type ||
+	    he->mem_type == &canary_type)
+		return;
+
+	if (entry->mem_info) {
+		u8 hw_op = mem_info__data_src(entry->mem_info)->mem_op;
+
+		if (hw_op & PERF_MEM_OP_STORE)
+			is_store = true;
+		else if (hw_op & PERF_MEM_OP_LOAD)
+			is_store = false;
+	}
+
+	annotated_data_type__update_samples(he->mem_type, evsel,
+					    he->mem_type_off,
+					    entry->stat.nr_events,
+					    entry->stat.period,
+					    is_store);
 }
 
 /* Basic block traversal (BFS) data structure */

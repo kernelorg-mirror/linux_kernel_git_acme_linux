@@ -169,7 +169,11 @@ struct data_loc_info {
  * @invalid_size: Failed to get a size info of the type
  * @bad_offset: The access offset is out of the type
  * @bad_addr: The data address is not the one the IP's PC-relative
- * operand accesses
+ * operand accesses; counts samples, both the one that established the
+ * resolution and the ones folding into it
+ * @rejected_addr: Resolutions dropped for the same reason, i.e. the
+ * establishing ones; it is what keeps the ok/bad resolution outcome
+ * split adding up
  */
 struct annotated_data_stat {
 	int total;
@@ -185,6 +189,7 @@ struct annotated_data_stat {
 	int invalid_size;
 	int bad_offset;
 	int bad_addr;
+	int rejected_addr;
 	int insn_track;
 };
 extern struct annotated_data_stat ann_data_stat;

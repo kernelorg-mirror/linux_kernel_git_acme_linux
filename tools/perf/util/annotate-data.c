@@ -2023,6 +2023,18 @@ void annotated_data_stat__print(struct annotated_data_stat *s)
 {
 #define PRINT_STAT(fld) if (s->fld) printf("%10d : %s\n", s->fld, #fld)
 
+	/*
+	 * bad_addr counts samples (not resolutions): the ones dropped
+	 * because their data address is not the one the PC-relative
+	 * operand the recorded IP resolves to computes, both the one
+	 * that established the entry's resolution and the ones folding
+	 * into it.  It is directly comparable with the converter's
+	 * "Skipped N samples" report, and stays out of the resolution
+	 * outcome split below, like insn_track.  rejected_addr counts
+	 * the same drops at the resolution level, the ones that
+	 * established a resolution, which is what keeps ok/bad below
+	 * adding up.
+	 */
 	int bad = s->no_sym +
 			s->no_insn +
 			s->no_insn_ops +
@@ -2034,7 +2046,7 @@ void annotated_data_stat__print(struct annotated_data_stat *s)
 			s->no_typeinfo +
 			s->invalid_size +
 			s->bad_offset +
-			s->bad_addr;
+			s->rejected_addr;
 	int ok = s->total - bad;
 
 	printf("Annotate data type stats:\n");
@@ -2053,6 +2065,7 @@ void annotated_data_stat__print(struct annotated_data_stat *s)
 	PRINT_STAT(invalid_size);
 	PRINT_STAT(bad_offset);
 	PRINT_STAT(bad_addr);
+	PRINT_STAT(rejected_addr);
 	PRINT_STAT(insn_track);
 	printf("\n");
 

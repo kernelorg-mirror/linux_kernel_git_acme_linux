@@ -43,9 +43,13 @@ fi
 perfdata=$(mktemp /tmp/__perf_test.perf.data.XXXXX)
 json=$(mktemp /tmp/__perf_test.perf.data_type.json.XXXXX)
 buildid_list=$(mktemp /tmp/__perf_test.perf.buildid.list.XXXXX)
+ctfdir=$(mktemp -d /tmp/__perf_test.ctf.XXXXXX)
+ctferr=$(mktemp /tmp/__perf_test.ctf.err.XXXXX)
+typestat=$(mktemp /tmp/__perf_test.type.stat.XXXXX)
 
 cleanup() {
-	rm -f "${perfdata}" "${perfdata}".old "${json}" "${buildid_list}"
+	rm -rf "${perfdata}" "${perfdata}".old "${json}" "${buildid_list}" \
+		"${ctfdir}" "${ctferr}" "${typestat}"
 
 	trap - EXIT TERM INT
 }
@@ -187,8 +191,77 @@ test_json_export() {
 	validate_data_type_json "perf annotate"
 }
 
+# The aggregate JSON producer and the per-sample CTF one must agree on
+# what they resolved and what they dropped: it was exactly this
+# cross-check, run by hand on a capture, that found the samples recorded
+# with a bogus PEBS IP (the two deliverables disagreed on their access
+# direction) and led to the data address test.  Keep it running now that
+# both agree, so that any future divergence in what one of them counts
+# shows up here.
+test_ctf_crosscheck() {
+	local resolved skipped report_bad_addr report_samples
+
+	# The CTF writer is an optional build dependency.
+	if ! perf data convert --to-ctf="${ctfdir}" --force -i "${perfdata}" >/dev/null 2>"${ctferr}"
+	then
+		if grep -q "babeltrace2 ctf support is not compiled in" "${ctferr}"
+		then
+			echo "Skip: no CTF writer (libbabeltrace2) support"
+		else
+			echo "CTF cross-check [Failed: perf data convert]"
+			cat "${ctferr}"
+			err=1
+		fi
+		return
+	fi
+
+	# Same capture, same test: what the folded --sort type path drops
+	# and accounts against what the converter resolves per sample.
+	if ! perf report -i "${perfdata}" -s type --data-type-json="${json}" --type-stat --stdio > "${typestat}" 2>/dev/null
+	then
+		echo "CTF cross-check [Failed: perf report --type-stat]"
+		err=1
+		return
+	fi
+
+	report_bad_addr=$(awk '/: bad_addr$/ {print $1}' "${typestat}")
+	report_bad_addr=${report_bad_addr:-0}
+
+	if ! report_samples=$(python3 -c '
+import json, sys
+profile = json.load(open(sys.argv[1]))
+print(sum(histogram["total_samples"]
+          for dso in profile["dsos"] for data_type in dso["types"]
+          for histogram in data_type["histograms"]))
+' "${json}")
+	then
+		echo "CTF cross-check [Failed: reading the exported JSON]"
+		err=1
+		return
+	fi
+
+	resolved=$(sed -n 's/.*Resolved the data type of \([0-9]*\) samples.*/\1/p' "${ctferr}")
+	resolved=${resolved:-0}
+
+	skipped=$(sed -n 's/.*Skipped \([0-9]*\) samples.*/\1/p' "${ctferr}")
+	skipped=${skipped:-0}
+
+	if [ "${report_bad_addr}" != "${skipped}" ]
+	then
+		echo "CTF cross-check [Failed: 'perf report' dropped ${report_bad_addr} samples, the converter skipped ${skipped}]"
+		err=1
+	elif [ "${report_samples}" != "${resolved}" ]
+	then
+		echo "CTF cross-check [Failed: the JSON accounted ${report_samples} samples, the converter resolved ${resolved}]"
+		err=1
+	else
+		echo "CTF cross-check [Success: both producers dropped ${skipped} and resolved ${resolved} samples]"
+	fi
+}
+
 err=0
 test_json_export
+test_ctf_crosscheck
 
 cleanup
 exit $err

@@ -589,8 +589,29 @@ struct annotated_insn_loc {
 int annotate_get_insn_location(const struct arch *arch, struct disasm_line *dl,
 			       struct annotated_insn_loc *loc);
 
-/* Returns a data type from the sample instruction (if any) */
-struct annotated_data_type *hist_entry__get_data_type(struct hist_entry *he);
+/*
+ * Resolve and set the data type of a hist entry, accounting its samples
+ * into the type histograms the data type profiling views read.  Entries
+ * with no type resolved get the unknown_type placeholder, so calling it
+ * again on the same entry doesn't re-account its samples.
+ */
+void hist_entry__setup_data_type(struct hist_entry *he);
+
+/*
+ * Test a sample folding into a hist entry whose type was resolved
+ * through a PC-relative variable against that variable's range; returns
+ * false, counting it as bad_addr, when the recorded IP didn't perform
+ * the access.
+ */
+bool annotated_data_type__check_folded_sample(struct hist_entry *he, u64 addr);
+
+/*
+ * Account a sample folding into a hist entry into the entry's data type
+ * histogram, with its own direction; the sample that created the entry
+ * is accounted by hist_entry__setup_data_type().
+ */
+void annotated_data_type__account_folded_sample(struct hist_entry *he,
+						struct hist_entry *entry);
 
 /*
  * Same, without a hist entry: for consumers walking the sample stream
@@ -603,7 +624,8 @@ struct annotated_data_type *annotate_resolve_data_type(struct map_symbol *ms,
 						       struct evsel *evsel,
 						       int *type_offset,
 						       bool *is_store,
-						       u64 addr);
+						       u64 addr,
+						       u64 *mem_var_addr);
 
 struct annotated_item_stat {
 	struct list_head list;

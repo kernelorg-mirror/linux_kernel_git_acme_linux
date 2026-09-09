@@ -707,8 +707,29 @@ static struct hist_entry *hists__findnew_entry(struct hists *hists,
 		cmp = hist_entry__cmp(he, entry);
 		if (!cmp) {
 			if (sample_self) {
+				/*
+				 * A sample folding into an entry whose type
+				 * was resolved through a PC-relative
+				 * variable must have its data address
+				 * inside that variable's range, like the
+				 * sample that established the resolution
+				 * did; when it doesn't, the recorded IP did
+				 * not perform this access (PEBS IP fixup
+				 * failure), and the entry's resolution must
+				 * not absorb it.
+				 */
+				if (symbol_conf.annotate_data_sample &&
+				    !annotated_data_type__check_folded_sample(he,
+					    entry->mem_info ?
+						    mem_info__daddr(entry->mem_info)->addr : 0)) {
+					block_info__delete(entry->block_info);
+					kvm_info__zput(entry->kvm_info);
+					return he;
+				}
+
 				he_stat__add_stat(&he->stat, &entry->stat);
 				hist_entry__add_callchain_period(he, period, latency);
+				annotated_data_type__account_folded_sample(he, entry);
 			}
 			if (symbol_conf.cumulate_callchain)
 				he_stat__add_period(he->stat_acc, period, latency);
@@ -746,6 +767,17 @@ static struct hist_entry *hists__findnew_entry(struct hists *hists,
 	he = hist_entry__new(entry, sample_self);
 	if (!he)
 		return NULL;
+
+	/*
+	 * Resolve the data type of the sample that created the entry right
+	 * away: the variable range it establishes is what decides whether
+	 * the samples folding into this entry below belong to the access
+	 * the recorded IP performed.  Without it the folded samples would
+	 * all ride the resolution of the one sample that stayed in @he,
+	 * including the ones its recorded IP never touched.
+	 */
+	if (symbol_conf.annotate_data_sample && symbol_conf.init_annotation)
+		hist_entry__setup_data_type(he);
 
 	if (sample_self)
 		hist_entry__add_callchain_period(he, period, latency);
@@ -1094,9 +1126,23 @@ iter_finish_branch_entry(struct hist_entry_iter *iter,
 }
 
 static int
-iter_prepare_normal_entry(struct hist_entry_iter *iter __maybe_unused,
-			  struct addr_location *al __maybe_unused)
+iter_prepare_normal_entry(struct hist_entry_iter *iter, struct addr_location *al)
 {
+	struct perf_sample *sample = iter->sample;
+
+	/*
+	 * The data address of the sample: the data type resolution uses it
+	 * to tell the samples whose recorded IP performed the access from
+	 * the ones it didn't (PEBS IP fixup failure), both for the sample
+	 * that establishes a hist entry's resolution and for the ones
+	 * folding into it.
+	 */
+	if (symbol_conf.annotate_data_sample && sample->addr != 0) {
+		iter->mi = sample__resolve_mem(sample, al);
+		if (iter->mi == NULL)
+			return -ENOMEM;
+	}
+
 	return 0;
 }
 
@@ -1107,8 +1153,8 @@ iter_add_single_normal_entry(struct hist_entry_iter *iter, struct addr_location 
 	struct evsel *evsel = sample->evsel;
 	struct hist_entry *he;
 
-	he = hists__add_entry(evsel__hists(evsel), al, iter->parent, NULL, NULL,
-			      NULL, sample, true);
+	he = hists__add_entry(evsel__hists(evsel), al, iter->parent, NULL,
+			      iter->mi, NULL, sample, true);
 	if (he == NULL)
 		return -ENOMEM;
 
@@ -1123,6 +1169,8 @@ iter_finish_normal_entry(struct hist_entry_iter *iter,
 	struct hist_entry *he = iter->he;
 	struct perf_sample *sample = iter->sample;
 	struct evsel *evsel = sample->evsel;
+
+	mem_info__zput(iter->mi);
 
 	if (he == NULL)
 		return 0;

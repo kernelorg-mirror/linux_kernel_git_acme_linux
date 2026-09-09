@@ -307,6 +307,14 @@ struct hist_entry {
 	struct hist_entry	*parent_he;
 	struct hist_entry_ops	*ops;
 	struct annotated_data_type *mem_type;
+	/* address of the PC-relative operand mem_type was resolved from,
+	 * in the memory address space the sample data addresses are in,
+	 * zero when the resolution didn't go through a PC-relative
+	 * operand and the folded samples have nothing to be tested
+	 * against */
+	u64			mem_var_addr;
+	/* the instruction's own access direction, for the folded samples */
+	bool			mem_is_store;
 	union {
 		/* this is for hierarchical entry structure */
 		struct {

@@ -2478,13 +2478,6 @@ static struct sort_entry sort_addr = {
 
 /* --sort type */
 
-struct annotated_data_type unknown_type = {
-	.self = {
-		.type_name = (char *)"(unknown)",
-		.children = LIST_HEAD_INIT(unknown_type.self.children),
-	},
-};
-
 static int64_t
 sort__type_cmp(struct hist_entry *left, struct hist_entry *right)
 {
@@ -2496,11 +2489,7 @@ static void sort__type_init(struct hist_entry *he)
 	if (he->mem_type)
 		return;
 
-	he->mem_type = hist_entry__get_data_type(he);
-	if (he->mem_type == NULL) {
-		he->mem_type = &unknown_type;
-		he->mem_type_off = 0;
-	}
+	hist_entry__setup_data_type(he);
 }
 
 static int64_t
